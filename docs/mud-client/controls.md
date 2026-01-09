@@ -4,6 +4,7 @@
 
 - `F1`: Help
 - `F2`: Toggle timestamps
+- `F3`: Login dialog
 - `F5`: Connect
 - `F6`: Disconnect
 - `F10`: Quit

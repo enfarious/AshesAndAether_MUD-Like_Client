@@ -1,4 +1,5 @@
 using System.Text.Json;
+using NStack;
 using Terminal.Gui;
 
 namespace WodMudClient;
@@ -15,6 +16,9 @@ public sealed class MudClientApp : IDisposable
     private readonly MessageRouter _router;
     private SocketMessageMode _sendMode;
     private SocketMessageMode _receiveMode;
+    private readonly List<CharacterSummary> _characters = new();
+    private bool _canCreateCharacter;
+    private bool _pendingCharacterDialog;
 
     private readonly List<string> _logLines = new();
     private readonly List<string> _history = new();
@@ -62,7 +66,8 @@ public sealed class MudClientApp : IDisposable
             new MenuBarItem("_Connection", new[]
             {
                 new MenuItem("_Connect", "", () => _ = ConnectAsync(_config.ServerUrl)),
-                new MenuItem("_Disconnect", "", () => _ = DisconnectAsync())
+                new MenuItem("_Disconnect", "", () => _ = DisconnectAsync()),
+                new MenuItem("_Login", "", ShowLoginDialog)
             }),
             new MenuBarItem("_View", new[]
             {
@@ -75,6 +80,7 @@ public sealed class MudClientApp : IDisposable
         {
             new StatusItem(Key.F1, "~F1~ Help", ShowHelp),
             new StatusItem(Key.F2, "~F2~ Timestamps", ToggleTimestamps),
+            new StatusItem(Key.F3, "~F3~ Login", ShowLoginDialog),
             new StatusItem(Key.F5, "~F5~ Connect", () => _ = ConnectAsync(_config.ServerUrl)),
             new StatusItem(Key.F6, "~F6~ Disconnect", () => _ = DisconnectAsync()),
             new StatusItem(Key.F10, "~F10~ Quit", Quit)
@@ -164,7 +170,7 @@ public sealed class MudClientApp : IDisposable
             X = Pos.Right(_inputField) + 1,
             Y = 0
         };
-        sendButton.Clicked += () => SubmitInput(_inputField.Text.ToString());
+        sendButton.Clicked += () => SubmitInput(GetFieldText(_inputField));
 
         inputFrame.Add(_inputField, sendButton);
 
@@ -282,11 +288,22 @@ public sealed class MudClientApp : IDisposable
 
             Application.MainLoop.Invoke(() =>
             {
+                if (message.Type == "auth_success")
+                {
+                    UpdateAuthState(message.Payload);
+                }
+
                 foreach (var line in _router.Handle(message))
                 {
                     AppendLogLine(line);
                 }
                 RefreshTargetState();
+
+                if (_pendingCharacterDialog)
+                {
+                    _pendingCharacterDialog = false;
+                    ShowCharacterDialog();
+                }
             });
         };
     }
@@ -417,7 +434,7 @@ public sealed class MudClientApp : IDisposable
         var key = args.KeyEvent.Key;
         if (key == Key.Enter)
         {
-            SubmitInput(_inputField.Text.ToString());
+            SubmitInput(GetFieldText(_inputField));
             args.Handled = true;
             return;
         }
@@ -529,10 +546,215 @@ public sealed class MudClientApp : IDisposable
         AppendLogLine("Use macros for quick actions. Use the ring to send position intents relative to the current target.");
     }
 
+    private void ShowLoginDialog()
+    {
+        var okButton = new Button("Login");
+        var cancelButton = new Button("Cancel");
+        var dialog = new Dialog("Authenticate", 60, 20, okButton, cancelButton);
+
+        var methodLabel = new Label("Method:")
+        {
+            X = 1,
+            Y = 1
+        };
+        var methods = new[] { (ustring)"Guest", "Token", "Creds" };
+        var methodGroup = new RadioGroup(1, 2, methods, 0);
+
+        var guestLabel = new Label("Guest name:")
+        {
+            X = 1,
+            Y = 6
+        };
+        var guestField = new TextField("Wanderer")
+        {
+            X = 15,
+            Y = 6,
+            Width = 30
+        };
+
+        var tokenLabel = new Label("Token:")
+        {
+            X = 1,
+            Y = 8
+        };
+        var tokenField = new TextField(string.Empty)
+        {
+            X = 15,
+            Y = 8,
+            Width = 40
+        };
+
+        var userLabel = new Label("Username:")
+        {
+            X = 1,
+            Y = 10
+        };
+        var userField = new TextField(string.Empty)
+        {
+            X = 15,
+            Y = 10,
+            Width = 40
+        };
+
+        var passLabel = new Label("Password:")
+        {
+            X = 1,
+            Y = 12
+        };
+        var passField = new TextField(string.Empty)
+        {
+            X = 15,
+            Y = 12,
+            Width = 40,
+            Secret = true
+        };
+
+        void UpdateAuthFields()
+        {
+            var selected = methodGroup.SelectedItem;
+            var showGuest = selected == 0;
+            var showToken = selected == 1;
+            var showCreds = selected == 2;
+
+            guestLabel.Visible = showGuest;
+            guestField.Visible = showGuest;
+            tokenLabel.Visible = showToken;
+            tokenField.Visible = showToken;
+            userLabel.Visible = showCreds;
+            userField.Visible = showCreds;
+            passLabel.Visible = showCreds;
+            passField.Visible = showCreds;
+        }
+
+        methodGroup.SelectedItemChanged += _ => UpdateAuthFields();
+        UpdateAuthFields();
+
+        dialog.Add(methodLabel, methodGroup, guestLabel, guestField, tokenLabel, tokenField, userLabel, userField, passLabel, passField);
+
+        okButton.Clicked += () =>
+        {
+            switch (methodGroup.SelectedItem)
+            {
+                case 0:
+                    _ = SendMessageAsync("auth", new { method = "guest", guestName = GetFieldText(guestField) });
+                    AppendLogLine("Auth: guest request sent.");
+                    break;
+                case 1:
+                    if (string.IsNullOrWhiteSpace(GetFieldText(tokenField)))
+                    {
+                        MessageBox.ErrorQuery("Auth", "Token required.", "Ok");
+                        return;
+                    }
+                    _ = SendMessageAsync("auth", new { method = "token", token = GetFieldText(tokenField) });
+                    AppendLogLine("Auth: token request sent.");
+                    break;
+                case 2:
+                    if (string.IsNullOrWhiteSpace(GetFieldText(userField)) ||
+                        string.IsNullOrWhiteSpace(GetFieldText(passField)))
+                    {
+                        MessageBox.ErrorQuery("Auth", "Username and password required.", "Ok");
+                        return;
+                    }
+                    _ = SendMessageAsync("auth", new { method = "credentials", username = GetFieldText(userField), password = GetFieldText(passField) });
+                    AppendLogLine("Auth: credentials request sent.");
+                    break;
+            }
+
+            Application.RequestStop();
+        };
+
+        cancelButton.Clicked += () => Application.RequestStop();
+
+        Application.Run(dialog);
+    }
+
+    private void ShowCharacterDialog()
+    {
+        if (_characters.Count == 0 && !_canCreateCharacter)
+        {
+            AppendLogLine("No characters available.");
+            return;
+        }
+
+        var selectButton = new Button("Select");
+        var createButton = new Button("Create");
+        var cancelButton = new Button("Close");
+        createButton.Enabled = _canCreateCharacter;
+
+        var dialog = new Dialog("Character Select", 70, 20, selectButton, createButton, cancelButton);
+
+        var listLabel = new Label("Characters:")
+        {
+            X = 1,
+            Y = 1
+        };
+        var listItems = _characters
+            .Select(c => $"{c.Name} (lvl {c.Level}) - {c.Location}")
+            .ToList();
+        var listView = new ListView(listItems)
+        {
+            X = 1,
+            Y = 2,
+            Width = Dim.Fill(2),
+            Height = 8
+        };
+
+        var nameLabel = new Label("New name:")
+        {
+            X = 1,
+            Y = 11
+        };
+        var nameField = new TextField(string.Empty)
+        {
+            X = 12,
+            Y = 11,
+            Width = 30
+        };
+
+        dialog.Add(listLabel, listView, nameLabel, nameField);
+
+        selectButton.Clicked += () =>
+        {
+            if (_characters.Count == 0 || listView.SelectedItem < 0)
+            {
+                MessageBox.ErrorQuery("Select", "Choose a character.", "Ok");
+                return;
+            }
+
+            var selected = _characters[Math.Min(listView.SelectedItem, _characters.Count - 1)];
+            _ = SendMessageAsync("character_select", new { characterId = selected.Id });
+            AppendLogLine($"Character select: {selected.Name}");
+            Application.RequestStop();
+        };
+
+        createButton.Clicked += () =>
+        {
+            var name = GetFieldText(nameField).Trim();
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                MessageBox.ErrorQuery("Create", "Name required.", "Ok");
+                return;
+            }
+
+            _ = SendMessageAsync("character_create", new { name, appearance = new { description = "TBD" } });
+            AppendLogLine($"Character create: {name}");
+            Application.RequestStop();
+        };
+
+        cancelButton.Clicked += () => Application.RequestStop();
+
+        Application.Run(dialog);
+    }
+
     private void ToggleTimestamps()
     {
         _showTimestamps = !_showTimestamps;
         AppendLogLine($"Timestamps {(_showTimestamps ? "enabled" : "disabled")}.");
+    }
+
+    private static string GetFieldText(TextField field)
+    {
+        return field.Text?.ToString() ?? string.Empty;
     }
 
     private void ReloadConfig()
@@ -593,7 +815,14 @@ public sealed class MudClientApp : IDisposable
                 _ = SendHandshakeAsync();
                 break;
             case "auth":
-                HandleAuthCommand(parts);
+                if (parts.Length == 1)
+                {
+                    ShowLoginDialog();
+                }
+                else
+                {
+                    HandleAuthCommand(parts);
+                }
                 break;
             case "select":
                 if (parts.Length < 2)
@@ -712,8 +941,31 @@ public sealed class MudClientApp : IDisposable
         RefreshTargetState();
     }
 
+    private void UpdateAuthState(JsonElement payload)
+    {
+        _characters.Clear();
+        _canCreateCharacter = payload.GetPropertyOrDefault("canCreateCharacter")?.GetBoolean() ?? false;
+
+        if (payload.TryGetProperty("characters", out var characters) &&
+            characters.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var entry in characters.EnumerateArray())
+            {
+                var id = entry.GetPropertyOrDefault("id")?.GetString() ?? string.Empty;
+                var name = entry.GetPropertyOrDefault("name")?.GetString() ?? "Unknown";
+                var level = entry.GetPropertyOrDefault("level")?.GetInt32() ?? 0;
+                var location = entry.GetPropertyOrDefault("location")?.GetString() ?? "Unknown";
+                _characters.Add(new CharacterSummary(id, name, level, location));
+            }
+        }
+
+        _pendingCharacterDialog = true;
+    }
+
     public void Dispose()
     {
         _transport.Dispose();
     }
 }
+
+internal sealed record CharacterSummary(string Id, string Name, int Level, string Location);

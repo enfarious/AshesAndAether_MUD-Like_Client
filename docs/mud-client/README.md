@@ -23,6 +23,8 @@ dotnet run --project clients/mud -- .\clients\mud\config.json
 - Clickable macro buttons that emit text commands.
 - Position ring widget for relative movement intent.
 - WebSocket (Socket.io) handshake + auth flow support.
+- Login and character selection dialogs.
+- Content rating display from zone data.
 
 ## Protocol Modes
 

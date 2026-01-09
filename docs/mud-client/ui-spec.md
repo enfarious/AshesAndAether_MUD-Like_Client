@@ -17,6 +17,7 @@ to a text command so the client can stay simple and work with multiple servers.
 - Macro bar(s): click-to-send commands (FFXI-style).
 - Context panel: target actions and quick verbs based on selection.
 - Position ring widget: relative positioning around the target.
+- Content rating: display when entering or updating a zone.
 
 ## Clicky Menus (Macro Buttons)
 

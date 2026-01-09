@@ -12,6 +12,7 @@ Commands are prefixed with `/`. Anything else is sent as a text command using
 
 ## Authentication
 
+- `/auth`: Open the login dialog.
 - `/auth guest [name]`
 - `/auth token <token>`
 - `/auth creds <username> <password>`

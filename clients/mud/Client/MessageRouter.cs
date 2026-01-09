@@ -118,6 +118,7 @@ public sealed class MessageRouter
         {
             var zoneName = zone.GetPropertyOrDefault("name")?.GetString();
             var description = zone.GetPropertyOrDefault("description")?.GetString();
+            var rating = zone.GetPropertyOrDefault("contentRating")?.GetString();
             if (!string.IsNullOrWhiteSpace(zoneName))
             {
                 yield return zoneName!;
@@ -128,6 +129,10 @@ public sealed class MessageRouter
                 {
                     yield return line;
                 }
+            }
+            if (!string.IsNullOrWhiteSpace(rating))
+            {
+                yield return $"Content Rating: {FormatContentRating(rating!)}";
             }
         }
 
@@ -227,9 +232,14 @@ public sealed class MessageRouter
         {
             var time = zone.GetPropertyOrDefault("timeOfDay")?.GetString();
             var weather = zone.GetPropertyOrDefault("weather")?.GetString();
+            var rating = zone.GetPropertyOrDefault("contentRating")?.GetString();
             if (!string.IsNullOrWhiteSpace(time) || !string.IsNullOrWhiteSpace(weather))
             {
                 yield return $"Zone: {(string.IsNullOrWhiteSpace(time) ? "time ?" : time)} {(string.IsNullOrWhiteSpace(weather) ? string.Empty : $"({weather})")}".Trim();
+            }
+            if (!string.IsNullOrWhiteSpace(rating))
+            {
+                yield return $"Content Rating: {FormatContentRating(rating!)}";
             }
         }
     }
@@ -298,6 +308,17 @@ public sealed class MessageRouter
         {
             yield return line.ToString().TrimEnd();
         }
+    }
+
+    private static string FormatContentRating(string rating)
+    {
+        return rating.ToUpperInvariant() switch
+        {
+            "T" => "Teen (13+) [T]",
+            "M" => "Mature (17+) [M]",
+            "AO" => "Adults Only (18+) [AO]",
+            _ => $"{rating} [Unknown]"
+        };
     }
 }
 
