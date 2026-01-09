@@ -8,6 +8,11 @@ public sealed class StateStore
     public string? CurrentTargetId { get; private set; }
     public string? CurrentTargetName { get; private set; }
     public string? CurrentTargetToken => CurrentTargetId ?? CurrentTargetName;
+    public double? CurrentHeading { get; private set; }
+    public string? CurrentSpeed { get; private set; }
+    public IReadOnlyList<string> AvailableDirections => _availableDirections;
+
+    private readonly List<string> _availableDirections = new();
 
     public IReadOnlyCollection<EntityInfo> Entities => _entitiesById.Values;
 
@@ -85,6 +90,25 @@ public sealed class StateStore
     {
         CurrentTargetId = null;
         CurrentTargetName = null;
+    }
+
+    public void UpdateMovementState(double? heading, string? speed, IEnumerable<string>? availableDirections)
+    {
+        if (heading.HasValue)
+        {
+            CurrentHeading = heading;
+        }
+
+        if (!string.IsNullOrWhiteSpace(speed))
+        {
+            CurrentSpeed = speed;
+        }
+
+        if (availableDirections != null)
+        {
+            _availableDirections.Clear();
+            _availableDirections.AddRange(availableDirections);
+        }
     }
 }
 

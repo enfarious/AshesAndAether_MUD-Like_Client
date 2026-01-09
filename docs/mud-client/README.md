@@ -25,6 +25,7 @@ dotnet run --project clients/mud -- .\clients\mud\config.json
 - WebSocket (Socket.io) handshake + auth flow support.
 - Login and character selection dialogs.
 - Content rating display from zone data.
+- Movement command parsing (`Walk.N`, `Run.045`) into move messages.
 
 ## Protocol Modes
 

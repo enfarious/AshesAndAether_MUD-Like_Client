@@ -17,10 +17,11 @@
     "ranged_long"
   ],
   "macros": [
-    { "label": "North", "command": "north" },
-    { "label": "South", "command": "south" },
-    { "label": "East", "command": "east" },
-    { "label": "West", "command": "west" },
+    { "label": "North", "command": "Walk.N" },
+    { "label": "South", "command": "Walk.S" },
+    { "label": "East", "command": "Walk.E" },
+    { "label": "West", "command": "Walk.W" },
+    { "label": "Stop", "command": "Stop" },
     { "label": "Look", "command": "look" },
     { "label": "Who", "command": "who" },
     { "label": "Inv", "command": "inventory" },

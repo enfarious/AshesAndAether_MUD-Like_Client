@@ -29,6 +29,7 @@ public sealed class MudClientApp : IDisposable
     private TextField _inputField = null!;
     private Label _statusLabel = null!;
     private Label _targetLabel = null!;
+    private Label _movementLabel = null!;
     private Label _ringInfoLabel = null!;
     private PositionRingView _ringView = null!;
     private FrameView _macrosFrame = null!;
@@ -108,7 +109,7 @@ public sealed class MudClientApp : IDisposable
             X = 0,
             Y = 0,
             Width = Dim.Fill(),
-            Height = 3
+            Height = 4
         };
 
         _statusLabel = new Label("Status: disconnected")
@@ -127,7 +128,15 @@ public sealed class MudClientApp : IDisposable
             Height = 1
         };
 
-        header.Add(_statusLabel, _targetLabel);
+        _movementLabel = new Label("Movement: idle")
+        {
+            X = 1,
+            Y = 2,
+            Width = Dim.Fill(),
+            Height = 1
+        };
+
+        header.Add(_statusLabel, _targetLabel, _movementLabel);
 
         var logFrame = new FrameView("Log")
         {
@@ -298,6 +307,7 @@ public sealed class MudClientApp : IDisposable
                     AppendLogLine(line);
                 }
                 RefreshTargetState();
+                RefreshMovementState();
 
                 if (_pendingCharacterDialog)
                 {
@@ -466,6 +476,20 @@ public sealed class MudClientApp : IDisposable
 
     private async Task SendTextCommandAsync(string text)
     {
+        var movementResult = TryParseMovementCommand(text, out var movement, out var error);
+        if (movementResult == MovementParseResult.Invalid)
+        {
+            AppendLogLine(error ?? "Invalid movement command.");
+            return;
+        }
+
+        if (movementResult == MovementParseResult.Parsed)
+        {
+            await SendMovementCommandAsync(movement);
+            AppendLogLine($"> {text}");
+            return;
+        }
+
         var payload = new { text };
         await SendMessageAsync(_config.DefaultCommandType, payload);
         AppendLogLine($"> {text}");
@@ -522,6 +546,17 @@ public sealed class MudClientApp : IDisposable
         _targetLabel.Text = $"Target: {(string.IsNullOrWhiteSpace(targetToken) ? "none" : targetToken)}";
         _ringView.HasTarget = !string.IsNullOrWhiteSpace(targetToken);
         _ringView.SetNeedsDisplay();
+    }
+
+    private void RefreshMovementState()
+    {
+        var speed = string.IsNullOrWhiteSpace(_state.CurrentSpeed) ? "idle" : _state.CurrentSpeed!.ToLowerInvariant();
+        var heading = _state.CurrentHeading.HasValue ? HeadingToCompass(_state.CurrentHeading.Value) : "unknown";
+        var directions = _state.AvailableDirections.Count > 0
+            ? $"[{string.Join("] [", _state.AvailableDirections)}]"
+            : "none";
+
+        _movementLabel.Text = $"Movement: {speed} | Facing: {heading} | Available: {directions}";
     }
 
     private void AppendLogLine(string line)
@@ -756,6 +791,143 @@ public sealed class MudClientApp : IDisposable
     {
         return field.Text?.ToString() ?? string.Empty;
     }
+
+    private async Task SendMovementCommandAsync(MovementCommand movement)
+    {
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (movement.Compass != null)
+        {
+            await SendMessageAsync("move", new { method = "compass", speed = movement.Speed, compass = movement.Compass, timestamp });
+            return;
+        }
+
+        if (movement.Heading.HasValue)
+        {
+            await SendMessageAsync("move", new { method = "heading", speed = movement.Speed, heading = movement.Heading.Value, timestamp });
+            return;
+        }
+
+        await SendMessageAsync("move", new { method = "heading", speed = movement.Speed, timestamp });
+    }
+
+    private MovementParseResult TryParseMovementCommand(string text, out MovementCommand movement, out string? error)
+    {
+        movement = default;
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return MovementParseResult.NotMovement;
+        }
+
+        var trimmed = text.Trim();
+        var separatorIndex = trimmed.IndexOf('.');
+        if (separatorIndex < 0)
+        {
+            separatorIndex = trimmed.IndexOf(' ');
+        }
+
+        var speedToken = separatorIndex >= 0 ? trimmed[..separatorIndex] : trimmed;
+        var directionToken = separatorIndex >= 0 ? trimmed[(separatorIndex + 1)..].Trim() : string.Empty;
+
+        if (string.IsNullOrWhiteSpace(speedToken))
+        {
+            return MovementParseResult.NotMovement;
+        }
+
+        var speed = speedToken.ToLowerInvariant();
+        if (speed is not ("walk" or "jog" or "run" or "stop"))
+        {
+            return MovementParseResult.NotMovement;
+        }
+
+        if (speed == "stop")
+        {
+            movement = new MovementCommand(speed, null, null);
+            return MovementParseResult.Parsed;
+        }
+
+        if (string.IsNullOrWhiteSpace(directionToken))
+        {
+            movement = new MovementCommand(speed, null, null);
+            return MovementParseResult.Parsed;
+        }
+
+        if (TryParseHeading(directionToken, out var heading))
+        {
+            movement = new MovementCommand(speed, heading, null);
+            return MovementParseResult.Parsed;
+        }
+
+        if (TryParseCompass(directionToken, out var compass))
+        {
+            movement = new MovementCommand(speed, null, compass);
+            return MovementParseResult.Parsed;
+        }
+
+        error = $"Invalid movement direction: {directionToken}";
+        return MovementParseResult.Invalid;
+    }
+
+    private static bool TryParseHeading(string token, out int heading)
+    {
+        heading = 0;
+        if (!int.TryParse(token, out var value))
+        {
+            return false;
+        }
+
+        if (value == 360)
+        {
+            heading = 0;
+            return true;
+        }
+
+        heading = ((value % 360) + 360) % 360;
+        return true;
+    }
+
+    private static bool TryParseCompass(string token, out string compass)
+    {
+        compass = string.Empty;
+        var normalized = token.Replace("-", string.Empty).Replace("_", string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return false;
+        }
+
+        normalized = normalized.ToUpperInvariant();
+        compass = normalized switch
+        {
+            "N" or "NORTH" => "N",
+            "NE" or "NORTHEAST" => "NE",
+            "E" or "EAST" => "E",
+            "SE" or "SOUTHEAST" => "SE",
+            "S" or "SOUTH" => "S",
+            "SW" or "SOUTHWEST" => "SW",
+            "W" or "WEST" => "W",
+            "NW" or "NORTHWEST" => "NW",
+            _ => string.Empty
+        };
+
+        return !string.IsNullOrWhiteSpace(compass);
+    }
+
+    private static string HeadingToCompass(double heading)
+    {
+        var dirs = new[] { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+        var index = (int)Math.Round(heading / 45.0) % dirs.Length;
+        return dirs[Math.Clamp(index, 0, dirs.Length - 1)];
+    }
+
+    private enum MovementParseResult
+    {
+        NotMovement,
+        Parsed,
+        Invalid
+    }
+
+    private readonly record struct MovementCommand(string Speed, int? Heading, string? Compass);
 
     private void ReloadConfig()
     {

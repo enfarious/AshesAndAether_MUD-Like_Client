@@ -182,6 +182,11 @@ public sealed class MessageRouter
                 }
             }
         }
+
+        foreach (var line in ApplyMovementState(payload, logAvailableDirections: true))
+        {
+            yield return line;
+        }
     }
 
     private IEnumerable<string> RenderStateUpdate(JsonElement payload)
@@ -241,6 +246,11 @@ public sealed class MessageRouter
             {
                 yield return $"Content Rating: {FormatContentRating(rating!)}";
             }
+        }
+
+        foreach (var line in ApplyMovementState(payload, logAvailableDirections: false))
+        {
+            yield return line;
         }
     }
 
@@ -318,6 +328,86 @@ public sealed class MessageRouter
             "M" => "Mature (17+) [M]",
             "AO" => "Adults Only (18+) [AO]",
             _ => $"{rating} [Unknown]"
+        };
+    }
+
+    private IEnumerable<string> ApplyMovementState(JsonElement payload, bool logAvailableDirections)
+    {
+        if (payload.TryGetProperty("character", out var character))
+        {
+            var heading = GetNumber(character.GetPropertyOrDefault("heading"));
+            var speed = character.GetPropertyOrDefault("currentSpeed")?.GetString();
+            _state.UpdateMovementState(heading, speed, null);
+        }
+
+        if (TryGetTextMovement(payload, out var textMovement))
+        {
+            var directions = ParseAvailableDirections(textMovement);
+            var heading = GetNumber(textMovement.GetPropertyOrDefault("currentHeading"));
+            var speed = textMovement.GetPropertyOrDefault("currentSpeed")?.GetString();
+            _state.UpdateMovementState(heading, speed, directions);
+
+            if (logAvailableDirections && directions.Count > 0)
+            {
+                yield return FormatDirections(directions);
+            }
+        }
+    }
+
+    private static List<string> ParseAvailableDirections(JsonElement textMovement)
+    {
+        var directions = new List<string>();
+        if (textMovement.TryGetProperty("availableDirections", out var directionElement) &&
+            directionElement.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var entry in directionElement.EnumerateArray())
+            {
+                var direction = entry.GetString();
+                if (!string.IsNullOrWhiteSpace(direction))
+                {
+                    directions.Add(direction!);
+                }
+            }
+        }
+
+        return directions;
+    }
+
+    private static string FormatDirections(IReadOnlyList<string> directions)
+    {
+        return $"Available directions: [{string.Join("] [", directions)}]";
+    }
+
+    private static bool TryGetTextMovement(JsonElement payload, out JsonElement textMovement)
+    {
+        if (payload.TryGetProperty("textMovement", out textMovement))
+        {
+            return true;
+        }
+
+        if (payload.TryGetProperty("character", out var character) &&
+            character.ValueKind == JsonValueKind.Object &&
+            character.TryGetProperty("textMovement", out textMovement))
+        {
+            return true;
+        }
+
+        textMovement = default;
+        return false;
+    }
+
+    private static double? GetNumber(JsonElement? element)
+    {
+        if (!element.HasValue)
+        {
+            return null;
+        }
+
+        return element.Value.ValueKind switch
+        {
+            JsonValueKind.Number => element.Value.GetDouble(),
+            JsonValueKind.String => double.TryParse(element.Value.GetString(), out var value) ? value : null,
+            _ => null
         };
     }
 }

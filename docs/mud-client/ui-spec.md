@@ -14,10 +14,12 @@ to a text command so the client can stay simple and work with multiple servers.
 - Main log: scrollback, timestamp toggle, and channel filters.
 - Input line: history, autocomplete, and slash/keyword shortcuts.
 - Status strip: HP/MP/Endurance, stance, target, and buffs.
+- Movement strip: current speed, facing, and available directions.
 - Macro bar(s): click-to-send commands (FFXI-style).
 - Context panel: target actions and quick verbs based on selection.
 - Position ring widget: relative positioning around the target.
 - Content rating: display when entering or updating a zone.
+- Movement commands: parse `Walk.N`, `Jog.NE`, `Run.045`, `Stop`.
 
 ## Clicky Menus (Macro Buttons)
 

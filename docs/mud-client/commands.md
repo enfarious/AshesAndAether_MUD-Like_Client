@@ -22,6 +22,16 @@ Commands are prefixed with `/`. Anything else is sent as a text command using
 - `/select <characterId>`
 - `/create <name>`
 
+## Movement
+
+Movement commands use the `Speed.Direction` format and are converted to `move`
+messages automatically.
+
+- `Walk.N`, `Jog.NE`, `Run.SW`
+- `Walk.045` (exact heading degrees)
+- `Walk` (continue current heading)
+- `Stop`
+
 ## Targeting
 
 - `/target <name|id>`: Sets target from known entities (or raw token).
