@@ -1,0 +1,29 @@
+{
+  "serverUrl": "http://localhost:3000",
+  "sendMode": "event",
+  "receiveMode": "event",
+  "sendEventName": "message",
+  "receiveEventName": "message",
+  "protocolVersion": "1.0.0",
+  "clientVersion": "0.1.0",
+  "maxUpdateRate": 1,
+  "autoConnect": false,
+  "defaultCommandType": "command",
+  "positionCommandTemplate": "position {target} {range_band} {angle_deg}",
+  "rangeBands": [
+    "melee_close",
+    "melee_long",
+    "ranged_short",
+    "ranged_long"
+  ],
+  "macros": [
+    { "label": "North", "command": "north" },
+    { "label": "South", "command": "south" },
+    { "label": "East", "command": "east" },
+    { "label": "West", "command": "west" },
+    { "label": "Look", "command": "look" },
+    { "label": "Who", "command": "who" },
+    { "label": "Inv", "command": "inventory" },
+    { "label": "Attack", "command": "attack" }
+  ]
+}
