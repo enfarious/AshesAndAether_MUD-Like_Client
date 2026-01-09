@@ -14,6 +14,7 @@ public sealed class MudClientApp : IDisposable
     private readonly StateStore _state = new();
     private readonly MacroEngine _macroEngine = new();
     private readonly MessageRouter _router;
+    private readonly ThemeManager _themeManager = new();
     private SocketMessageMode _sendMode;
     private SocketMessageMode _receiveMode;
     private readonly List<CharacterSummary> _characters = new();
@@ -33,6 +34,10 @@ public sealed class MudClientApp : IDisposable
     private Label _ringInfoLabel = null!;
     private PositionRingView _ringView = null!;
     private FrameView _macrosFrame = null!;
+    private MenuBar _menuBar = null!;
+    private StatusBar _statusBar = null!;
+    private Window _window = null!;
+    private string _activeThemeName = "ember";
 
     public MudClientApp(MudClientConfig config, string configPath)
     {
@@ -62,7 +67,7 @@ public sealed class MudClientApp : IDisposable
     {
         var top = Application.Top;
 
-        var menu = new MenuBar(new[]
+        _menuBar = new MenuBar(new[]
         {
             new MenuBarItem("_Connection", new[]
             {
@@ -73,11 +78,12 @@ public sealed class MudClientApp : IDisposable
             new MenuBarItem("_View", new[]
             {
                 new MenuItem("_Toggle Timestamps", "", ToggleTimestamps),
-                new MenuItem("_Reload Config", "", ReloadConfig)
-            })
+                new MenuItem("_Reload Config", "", ReloadConfig),
+            }),
+            new MenuBarItem("_Themes", BuildThemeMenuItems())
         });
 
-        var statusBar = new StatusBar(new[]
+        _statusBar = new StatusBar(new[]
         {
             new StatusItem(Key.F1, "~F1~ Help", ShowHelp),
             new StatusItem(Key.F2, "~F2~ Timestamps", ToggleTimestamps),
@@ -87,7 +93,7 @@ public sealed class MudClientApp : IDisposable
             new StatusItem(Key.F10, "~F10~ Quit", Quit)
         });
 
-        var window = new Window("World of Darkness - MUD Client v0.1")
+        _window = new Window("World of Darkness - MUD Client v0.1")
         {
             X = 0,
             Y = 1,
@@ -95,9 +101,10 @@ public sealed class MudClientApp : IDisposable
             Height = Dim.Fill(1)
         };
 
-        BuildMainLayout(window);
+        BuildMainLayout(_window);
+        ApplyTheme(_config.Theme, logChange: false);
 
-        top.Add(menu, window, statusBar);
+        top.Add(_menuBar, _window, _statusBar);
     }
 
     private void BuildMainLayout(Window window)
@@ -577,7 +584,7 @@ public sealed class MudClientApp : IDisposable
 
     private void ShowHelp()
     {
-        AppendLogLine("Client commands: /help /connect /disconnect /handshake /auth /select /create /target /clear-target /ping /raw /reload /quit");
+        AppendLogLine("Client commands: /help /connect /disconnect /handshake /auth /select /create /target /clear-target /ping /raw /reload /theme /quit");
         AppendLogLine("Use macros for quick actions. Use the ring to send position intents relative to the current target.");
     }
 
@@ -941,6 +948,8 @@ public sealed class MudClientApp : IDisposable
         _config.ClientVersion = updated.ClientVersion;
         _config.MaxUpdateRate = updated.MaxUpdateRate;
         _config.DefaultCommandType = updated.DefaultCommandType;
+        _config.Theme = updated.Theme;
+        _config.CustomTheme = updated.CustomTheme;
         _config.PositionCommandTemplate = updated.PositionCommandTemplate;
         _config.RangeBands = updated.RangeBands;
         _config.Macros = updated.Macros;
@@ -950,6 +959,7 @@ public sealed class MudClientApp : IDisposable
 
         _ringView.RangeBands = _config.RangeBands;
         BuildMacroButtons();
+        ApplyTheme(_config.Theme, logChange: true);
         AppendLogLine("Config reloaded.");
     }
 
@@ -1031,6 +1041,9 @@ public sealed class MudClientApp : IDisposable
                 var raw = commandLine.Substring(commandLine.IndexOf(' ') + 1);
                 _ = SendRawAsync(raw);
                 break;
+            case "theme":
+                HandleThemeCommand(parts);
+                break;
             case "reload":
                 ReloadConfig();
                 break;
@@ -1111,6 +1124,71 @@ public sealed class MudClientApp : IDisposable
         }
 
         RefreshTargetState();
+    }
+
+    private void HandleThemeCommand(string[] parts)
+    {
+        if (parts.Length == 1 || string.Equals(parts[1], "list", StringComparison.OrdinalIgnoreCase))
+        {
+            var themes = GetAvailableThemes();
+            AppendLogLine($"Themes: {string.Join(", ", themes)}");
+            return;
+        }
+
+        ApplyTheme(parts[1], logChange: true);
+    }
+
+    private MenuItem[] BuildThemeMenuItems()
+    {
+        var items = new List<MenuItem>();
+        foreach (var theme in GetAvailableThemes())
+        {
+            items.Add(new MenuItem(theme, "", () => ApplyTheme(theme, logChange: true)));
+        }
+
+        return items.ToArray();
+    }
+
+    private IReadOnlyList<string> GetAvailableThemes()
+    {
+        var themes = _themeManager.PresetNames.ToList();
+        themes.Add("custom");
+        return themes;
+    }
+
+    private void ApplyTheme(string themeName, bool logChange)
+    {
+        if (string.Equals(themeName, "custom", StringComparison.OrdinalIgnoreCase) &&
+            !_themeManager.HasCustomTheme(_config.CustomTheme))
+        {
+            AppendLogLine("Custom theme is not configured.");
+            return;
+        }
+
+        var scheme = _themeManager.Resolve(themeName, _config.CustomTheme, out var resolvedName);
+        _activeThemeName = resolvedName;
+        _config.Theme = resolvedName;
+
+        Application.Top.ColorScheme = scheme;
+        _menuBar.ColorScheme = scheme;
+        _statusBar.ColorScheme = scheme;
+        _window.ColorScheme = scheme;
+        _logView.ColorScheme = scheme;
+        _inputField.ColorScheme = scheme;
+        _macrosFrame.ColorScheme = scheme;
+        _ringView.ColorScheme = scheme;
+        _statusLabel.ColorScheme = scheme;
+        _targetLabel.ColorScheme = scheme;
+        _movementLabel.ColorScheme = scheme;
+        _ringInfoLabel.ColorScheme = scheme;
+
+        Application.Top.SetNeedsDisplay();
+        _window.SetNeedsDisplay();
+
+        if (logChange)
+        {
+            AppendLogLine($"Theme set to {_activeThemeName}.");
+        }
     }
 
     private void UpdateAuthState(JsonElement payload)

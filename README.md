@@ -9,3 +9,4 @@ Docs:
 - `docs/mud-client/config.md`
 - `docs/mud-client/commands.md`
 - `docs/mud-client/controls.md`
+- `docs/mud-client/themes.md`

@@ -14,6 +14,8 @@ public sealed class MudClientConfig
     public int MaxUpdateRate { get; set; } = 1;
     public bool AutoConnect { get; set; }
     public string DefaultCommandType { get; set; } = "command";
+    public string Theme { get; set; } = "ember";
+    public ThemeConfig CustomTheme { get; set; } = new();
     public string PositionCommandTemplate { get; set; } = "position {target} {range_band} {angle_deg}";
     public List<string> RangeBands { get; set; } = new()
     {
@@ -51,4 +53,14 @@ public sealed class MacroDefinition
 {
     public string Label { get; set; } = string.Empty;
     public string Command { get; set; } = string.Empty;
+}
+
+public sealed class ThemeConfig
+{
+    public string? NormalForeground { get; set; }
+    public string? NormalBackground { get; set; }
+    public string? AccentForeground { get; set; }
+    public string? AccentBackground { get; set; }
+    public string? MutedForeground { get; set; }
+    public string? MutedBackground { get; set; }
 }

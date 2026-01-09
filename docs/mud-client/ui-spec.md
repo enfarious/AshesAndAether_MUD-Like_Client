@@ -20,6 +20,7 @@ to a text command so the client can stay simple and work with multiple servers.
 - Position ring widget: relative positioning around the target.
 - Content rating: display when entering or updating a zone.
 - Movement commands: parse `Walk.N`, `Jog.NE`, `Run.045`, `Stop`.
+- Theme support: switch between presets and custom palettes.
 
 ## Clicky Menus (Macro Buttons)
 

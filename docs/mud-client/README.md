@@ -26,6 +26,7 @@ dotnet run --project clients/mud -- .\clients\mud\config.json
 - Login and character selection dialogs.
 - Content rating display from zone data.
 - Movement command parsing (`Walk.N`, `Run.045`) into move messages.
+- Theme switching with presets and custom palettes.
 
 ## Protocol Modes
 
@@ -40,3 +41,4 @@ The client supports both Socket.io styles:
 - `docs/mud-client/config.md`
 - `docs/mud-client/commands.md`
 - `docs/mud-client/controls.md`
+- `docs/mud-client/themes.md`

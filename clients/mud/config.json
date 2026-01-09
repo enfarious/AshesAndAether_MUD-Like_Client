@@ -9,6 +9,14 @@
   "maxUpdateRate": 1,
   "autoConnect": false,
   "defaultCommandType": "command",
+  "theme": "ember",
+  "customTheme": {
+    "normalForeground": "BrightWhite",
+    "normalBackground": "Black",
+    "accentForeground": "BrightCyan",
+    "accentBackground": "Black",
+    "mutedForeground": "DarkGray"
+  },
   "positionCommandTemplate": "position {target} {range_band} {angle_deg}",
   "rangeBands": [
     "melee_close",

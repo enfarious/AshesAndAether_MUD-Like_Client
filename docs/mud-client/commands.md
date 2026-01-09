@@ -41,6 +41,8 @@ messages automatically.
 
 - `/raw <json>`: Send raw JSON payload (advanced).
 - `/raw` in `event` mode uses `event` or `type` if present.
+- `/theme list`
+- `/theme <name>`
 - `/reload`: Reload `config.json`.
 - `/help`
 - `/quit`
