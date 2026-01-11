@@ -1,4 +1,4 @@
-# WorldOfDarkness_Clients
+# WorldOfDarkness MUD Client
 
 Frontends to connect to WorldOfDarkness
 
