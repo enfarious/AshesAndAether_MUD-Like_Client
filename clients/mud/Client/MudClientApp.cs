@@ -1166,20 +1166,25 @@ public sealed class MudClientApp : IDisposable
 
     private async Task SendMovementCommandAsync(MovementCommand movement)
     {
-        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (string.Equals(movement.Speed, "stop", StringComparison.OrdinalIgnoreCase))
+        {
+            await SendSlashCommandAsync("/stop");
+            return;
+        }
+
         if (movement.Compass != null)
         {
-            await SendMessageAsync("move", new { method = "compass", speed = movement.Speed, compass = movement.Compass, timestamp });
+            await SendSlashCommandAsync($"/move compass:{movement.Compass} speed:{movement.Speed}");
             return;
         }
 
         if (movement.Heading.HasValue)
         {
-            await SendMessageAsync("move", new { method = "heading", speed = movement.Speed, heading = movement.Heading.Value, timestamp });
+            await SendSlashCommandAsync($"/move heading:{movement.Heading.Value} speed:{movement.Speed}");
             return;
         }
 
-        await SendMessageAsync("move", new { method = "heading", speed = movement.Speed, timestamp });
+        await SendSlashCommandAsync($"/move speed:{movement.Speed}");
     }
 
     private MovementParseResult TryParseMovementCommand(string text, out MovementCommand movement, out string? error)
