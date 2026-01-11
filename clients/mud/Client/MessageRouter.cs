@@ -1,3 +1,6 @@
+using System;
+using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 
@@ -12,7 +15,7 @@ public sealed class MessageRouter
         _state = state;
     }
 
-    public IEnumerable<string> Handle(IncomingMessage message)
+    public IEnumerable<string> Handle(IncomingMessage message, bool includeDiagnostics)
     {
         if (message.Payload.ValueKind == JsonValueKind.Undefined ||
             message.Payload.ValueKind == JsonValueKind.Null)
@@ -24,15 +27,21 @@ public sealed class MessageRouter
         switch (message.Type)
         {
             case "handshake_ack":
-                foreach (var line in RenderHandshakeAck(message.Payload))
+                if (includeDiagnostics)
                 {
-                    yield return line;
+                    foreach (var line in RenderHandshakeAck(message.Payload))
+                    {
+                        yield return line;
+                    }
                 }
                 yield break;
             case "auth_success":
-                foreach (var line in RenderAuthSuccess(message.Payload))
+                if (includeDiagnostics)
                 {
-                    yield return line;
+                    foreach (var line in RenderAuthSuccess(message.Payload))
+                    {
+                        yield return line;
+                    }
                 }
                 yield break;
             case "auth_error":
@@ -50,7 +59,10 @@ public sealed class MessageRouter
             case "state_update":
                 foreach (var line in RenderStateUpdate(message.Payload))
                 {
-                    yield return line;
+                    if (includeDiagnostics)
+                    {
+                        yield return line;
+                    }
                 }
                 yield break;
             case "event":
@@ -65,8 +77,29 @@ public sealed class MessageRouter
                     yield return line;
                 }
                 yield break;
+            case "communication":
+                foreach (var line in RenderCommunication(message.Payload))
+                {
+                    yield return line;
+                }
+                yield break;
+            case "command_response":
+                foreach (var line in RenderCommandResponse(message.Payload))
+                {
+                    yield return line;
+                }
+                yield break;
+            case "proximity_roster":
+                ApplyProximityRoster(message.Payload);
+                yield break;
+            case "proximity_roster_delta":
+                ApplyProximityRosterDelta(message.Payload);
+                yield break;
             default:
-                yield return $"< {message.Type} {message.Payload.GetRawText()}";
+                if (includeDiagnostics)
+                {
+                    yield return $"< {message.Type} {message.Payload.GetRawText()}";
+                }
                 yield break;
         }
     }
@@ -112,6 +145,7 @@ public sealed class MessageRouter
         {
             var name = character.GetPropertyOrDefault("name")?.GetString();
             yield return $"Entering world as {name}";
+            UpdatePlayerPositionFromCharacter(character);
         }
 
         if (payload.TryGetProperty("zone", out var zone))
@@ -248,6 +282,11 @@ public sealed class MessageRouter
             }
         }
 
+        if (payload.TryGetProperty("character", out var movementCharacter))
+        {
+            UpdatePlayerPositionFromCharacter(movementCharacter);
+        }
+
         foreach (var line in ApplyMovementState(payload, logAvailableDirections: false))
         {
             yield return line;
@@ -281,14 +320,76 @@ public sealed class MessageRouter
         yield return $"Error: {code} {message}".Trim();
     }
 
+    private IEnumerable<string> RenderCommunication(JsonElement payload)
+    {
+        var type = payload.GetPropertyOrDefault("type")?.GetString() ?? "say";
+        var senderName = payload.GetPropertyOrDefault("senderName")?.GetString() ?? "Unknown";
+        var content = payload.GetPropertyOrDefault("content")?.GetString() ?? string.Empty;
+        var distance = GetNumber(payload.GetPropertyOrDefault("distance"));
+
+        var rangeTag = type.ToUpperInvariant();
+        var distanceText = distance.HasValue ? $" ({Math.Floor(distance.Value)}ft)" : string.Empty;
+
+        if (string.Equals(type, "emote", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return $"[{rangeTag}] {senderName} {content}".TrimEnd();
+            yield break;
+        }
+
+        var quoted = string.IsNullOrWhiteSpace(content) ? string.Empty : $"\"{content}\"";
+        yield return $"[{rangeTag}] {senderName}{distanceText}: {quoted}".TrimEnd();
+    }
+
+    private IEnumerable<string> RenderCommandResponse(JsonElement payload)
+    {
+        var success = payload.GetPropertyOrDefault("success")?.GetBoolean();
+        var command = payload.GetPropertyOrDefault("command")?.GetString();
+        var message = payload.GetPropertyOrDefault("message")?.GetString();
+
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            yield return message!;
+            yield break;
+        }
+
+        if (!string.IsNullOrWhiteSpace(command))
+        {
+            var status = success.HasValue && success.Value ? "ok" : "failed";
+            yield return $"Command {status}: {command}";
+        }
+    }
+
     private static EntityInfo ParseEntity(JsonElement entry)
     {
-        return new EntityInfo
+        var info = new EntityInfo
         {
             Id = entry.GetPropertyOrDefault("id")?.GetString() ?? string.Empty,
             Name = entry.GetPropertyOrDefault("name")?.GetString() ?? string.Empty,
-            Type = entry.GetPropertyOrDefault("type")?.GetString() ?? "entity"
+            Type = entry.GetPropertyOrDefault("type")?.GetString() ?? "entity",
+            Description = entry.GetPropertyOrDefault("description")?.GetString()
         };
+
+        if (TryParsePosition(entry.GetPropertyOrDefault("position"), out var position))
+        {
+            info.Position = position;
+        }
+
+        if (TryGetDouble(entry, "bearing", out var bearing))
+        {
+            info.Bearing = bearing;
+        }
+
+        if (TryGetDouble(entry, "elevation", out var elevation))
+        {
+            info.Elevation = elevation;
+        }
+
+        if (TryGetDouble(entry, "range", out var range) || TryGetDouble(entry, "distance", out range))
+        {
+            info.Range = range;
+        }
+
+        return info;
     }
 
     private static IEnumerable<string> WrapText(string text, int width)
@@ -354,6 +455,213 @@ public sealed class MessageRouter
         }
     }
 
+    private void ApplyProximityRoster(JsonElement payload)
+    {
+        if (payload.TryGetProperty("dangerState", out var danger))
+        {
+            _state.ProximityRoster.UpdateDangerState(danger.GetBoolean());
+        }
+
+        if (!payload.TryGetProperty("channels", out var channels) ||
+            channels.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        foreach (var channel in channels.EnumerateObject())
+        {
+            var delta = new ProximityChannelDelta();
+            var channelPayload = channel.Value;
+            if (channelPayload.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            if (channelPayload.TryGetProperty("entities", out var entitiesElement) &&
+                entitiesElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var entry in entitiesElement.EnumerateArray())
+                {
+                    if (TryParseProximityEntity(entry, out var entity))
+                    {
+                        delta.Added.Add(entity);
+                    }
+                }
+            }
+
+            if (channelPayload.TryGetProperty("count", out var count))
+            {
+                if (count.ValueKind == JsonValueKind.Number && count.TryGetInt32(out var countValue))
+                {
+                    delta.Count = countValue;
+                }
+            }
+
+            if (channelPayload.TryGetProperty("sample", out var sample) &&
+                sample.ValueKind == JsonValueKind.Array)
+            {
+                delta.Sample = sample.EnumerateArray()
+                    .Select(entry => entry.GetString())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Select(value => value!)
+                    .ToList();
+            }
+
+            if (channelPayload.TryGetProperty("lastSpeaker", out var lastSpeaker))
+            {
+                delta.LastSpeaker = lastSpeaker.GetString();
+                delta.LastSpeakerChanged = true;
+            }
+
+            _state.ProximityRoster.ApplyDelta(channel.Name, delta);
+        }
+    }
+
+    private void ApplyProximityRosterDelta(JsonElement payload)
+    {
+        if (payload.TryGetProperty("dangerState", out var danger))
+        {
+            _state.ProximityRoster.UpdateDangerState(danger.GetBoolean());
+        }
+
+        if (!payload.TryGetProperty("channels", out var channels) ||
+            channels.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        foreach (var channel in channels.EnumerateObject())
+        {
+            var delta = new ProximityChannelDelta();
+            var channelPayload = channel.Value;
+            if (channelPayload.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            if (channelPayload.TryGetProperty("added", out var added) &&
+                added.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var entry in added.EnumerateArray())
+                {
+                    if (TryParseProximityEntity(entry, out var entity))
+                    {
+                        delta.Added.Add(entity);
+                    }
+                }
+            }
+
+            if (channelPayload.TryGetProperty("removed", out var removed) &&
+                removed.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var entry in removed.EnumerateArray())
+                {
+                    var id = entry.GetString();
+                    if (!string.IsNullOrWhiteSpace(id))
+                    {
+                        delta.Removed.Add(id!);
+                    }
+                }
+            }
+
+            if (channelPayload.TryGetProperty("updated", out var updated) &&
+                updated.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var entry in updated.EnumerateArray())
+                {
+                    if (TryParseProximityEntityDelta(entry, out var entity))
+                    {
+                        delta.Updated.Add(entity);
+                    }
+                }
+            }
+
+            if (channelPayload.TryGetProperty("count", out var count))
+            {
+                if (count.ValueKind == JsonValueKind.Number && count.TryGetInt32(out var countValue))
+                {
+                    delta.Count = countValue;
+                }
+            }
+
+            if (channelPayload.TryGetProperty("sample", out var sample))
+            {
+                if (sample.ValueKind == JsonValueKind.Null)
+                {
+                    delta.Sample = null;
+                }
+                else if (sample.ValueKind == JsonValueKind.Array)
+                {
+                    delta.Sample = sample.EnumerateArray()
+                        .Select(entry => entry.GetString())
+                        .Where(value => !string.IsNullOrWhiteSpace(value))
+                        .Select(value => value!)
+                        .ToList();
+                }
+            }
+
+            if (channelPayload.TryGetProperty("lastSpeaker", out var lastSpeaker))
+            {
+                delta.LastSpeakerChanged = true;
+                delta.LastSpeaker = lastSpeaker.ValueKind == JsonValueKind.Null ? null : lastSpeaker.GetString();
+            }
+
+            _state.ProximityRoster.ApplyDelta(channel.Name, delta);
+        }
+    }
+
+    private static bool TryParseProximityEntity(JsonElement entry, out ProximityEntity entity)
+    {
+        entity = new ProximityEntity
+        {
+            Id = entry.GetPropertyOrDefault("id")?.GetString() ?? string.Empty,
+            Name = entry.GetPropertyOrDefault("name")?.GetString() ?? string.Empty,
+            Type = entry.GetPropertyOrDefault("type")?.GetString() ?? "entity"
+        };
+
+        if (!TryGetDouble(entry, "bearing", out var bearing) ||
+            !TryGetDouble(entry, "elevation", out var elevation) ||
+            !TryGetDouble(entry, "range", out var range))
+        {
+            return false;
+        }
+
+        entity.Bearing = bearing;
+        entity.Elevation = elevation;
+        entity.Range = range;
+        return true;
+    }
+
+    private static bool TryParseProximityEntityDelta(JsonElement entry, out ProximityEntityDelta entity)
+    {
+        entity = new ProximityEntityDelta
+        {
+            Id = entry.GetPropertyOrDefault("id")?.GetString() ?? string.Empty,
+            Name = entry.GetPropertyOrDefault("name")?.GetString(),
+            Type = entry.GetPropertyOrDefault("type")?.GetString()
+        };
+
+        if (string.IsNullOrWhiteSpace(entity.Id))
+        {
+            return false;
+        }
+
+        if (TryGetDouble(entry, "bearing", out var bearing))
+        {
+            entity.Bearing = bearing;
+        }
+        if (TryGetDouble(entry, "elevation", out var elevation))
+        {
+            entity.Elevation = elevation;
+        }
+        if (TryGetDouble(entry, "range", out var range))
+        {
+            entity.Range = range;
+        }
+
+        return true;
+    }
+
     private static List<string> ParseAvailableDirections(JsonElement textMovement)
     {
         var directions = new List<string>();
@@ -408,6 +716,49 @@ public sealed class MessageRouter
             JsonValueKind.Number => element.Value.GetDouble(),
             JsonValueKind.String => double.TryParse(element.Value.GetString(), out var value) ? value : null,
             _ => null
+        };
+    }
+
+    private void UpdatePlayerPositionFromCharacter(JsonElement character)
+    {
+        if (TryParsePosition(character.GetPropertyOrDefault("position"), out var position))
+        {
+            _state.UpdatePlayerPosition(position);
+        }
+    }
+
+    private static bool TryParsePosition(JsonElement? element, out Vector3 position)
+    {
+        position = default;
+        if (!element.HasValue || element.Value.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (!TryGetDouble(element.Value, "x", out var x) ||
+            !TryGetDouble(element.Value, "y", out var y) ||
+            !TryGetDouble(element.Value, "z", out var z))
+        {
+            return false;
+        }
+
+        position = new Vector3(x, y, z);
+        return true;
+    }
+
+    private static bool TryGetDouble(JsonElement element, string propertyName, out double value)
+    {
+        value = 0;
+        if (!element.TryGetProperty(propertyName, out var prop))
+        {
+            return false;
+        }
+
+        return prop.ValueKind switch
+        {
+            JsonValueKind.Number => prop.TryGetDouble(out value),
+            JsonValueKind.String => double.TryParse(prop.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out value),
+            _ => false
         };
     }
 }

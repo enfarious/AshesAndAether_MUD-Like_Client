@@ -7,13 +7,13 @@ other MUD-style servers later.
 ## Quick Start
 
 ```powershell
-dotnet run --project clients/mud
+dotnet run --project client/mud
 ```
 
 Optional: pass a custom config path.
 
 ```powershell
-dotnet run --project clients/mud -- .\clients\mud\config.json
+dotnet run --project client/mud -- .\client\mud\config.json
 ```
 
 ## Features (v0.1)
@@ -22,6 +22,7 @@ dotnet run --project clients/mud -- .\clients\mud\config.json
 - Input line with history (up/down).
 - Clickable macro buttons that emit text commands.
 - Position ring widget for relative movement intent.
+- Nearby entity roster shows players/NPCs with bearing/elevation/range and Approach/Evade controls.
 - WebSocket (Socket.io) handshake + auth flow support.
 - Login and character selection dialogs.
 - Content rating display from zone data.

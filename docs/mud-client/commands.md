@@ -1,48 +1,8 @@
 # MUD Client Commands
 
-Commands are prefixed with `/`. Anything else is sent as a text command using
-`defaultCommandType`.
-
-## Connection
-
-- `/connect [url]`: Connect to the server (uses config if omitted).
-- `/disconnect`: Graceful disconnect.
-- `/handshake`: Send handshake payload.
-- `/ping`: Send a ping message.
-
-## Authentication
-
-- `/auth`: Open the login dialog.
-- `/auth guest [name]`
-- `/auth token <token>`
-- `/auth creds <username> <password>`
-
-## Character
-
-- `/select <characterId>`
-- `/create <name>`
-
-## Movement
-
-Movement commands use the `Speed.Direction` format and are converted to `move`
-messages automatically.
-
-- `Walk.N`, `Jog.NE`, `Run.SW`
-- `Walk.045` (exact heading degrees)
-- `Walk` (continue current heading)
-- `Stop`
-
-## Targeting
-
-- `/target <name|id>`: Sets target from known entities (or raw token).
-- `/clear-target`
+Commands are prefixed with `/`. Slash commands are forwarded to the server as
+typed (including the leading `/`). Anything else is sent as a text command
+using `defaultCommandType`.
 
 ## Utilities
-
-- `/raw <json>`: Send raw JSON payload (advanced).
-- `/raw` in `event` mode uses `event` or `type` if present.
-- `/theme list`
-- `/theme <name>`
-- `/reload`: Reload `config.json`.
-- `/help`
-- `/quit`
+Client utilities live in the menu bar or hotkeys (F1/F3/F5/F6/F10, etc.).

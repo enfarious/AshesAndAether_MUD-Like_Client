@@ -12,7 +12,7 @@ public sealed class MudClientConfig
     public string ProtocolVersion { get; set; } = "1.0.0";
     public string ClientVersion { get; set; } = "0.1.0";
     public int MaxUpdateRate { get; set; } = 1;
-    public bool AutoConnect { get; set; }
+    public bool AutoConnect { get; set; } = true;
     public string DefaultCommandType { get; set; } = "command";
     public string Theme { get; set; } = "ember";
     public ThemeConfig CustomTheme { get; set; } = new();
@@ -25,6 +25,7 @@ public sealed class MudClientConfig
         "ranged_long"
     };
     public List<MacroDefinition> Macros { get; set; } = new();
+    public bool ShowDiagnosticInfo { get; set; } = false;
 
     public static MudClientConfig Load(string path)
     {

@@ -1,3 +1,7 @@
+using System;
+using System.Linq;
+using System;
+using System.Collections.Generic;
 using System.Text.Json;
 using NStack;
 using Terminal.Gui;
@@ -34,10 +38,21 @@ public sealed class MudClientApp : IDisposable
     private Label _ringInfoLabel = null!;
     private PositionRingView _ringView = null!;
     private FrameView _macrosFrame = null!;
+    private FrameView _rosterFrame = null!;
+    private ListView _entityListView = null!;
+    private Button _approachButton = null!;
+    private Button _evadeButton = null!;
+    private Label _entityActionLabel = null!;
+    private readonly List<NearbyEntityInfo> _entityRosterSnapshot = new();
     private MenuBar _menuBar = null!;
     private StatusBar _statusBar = null!;
     private Window _window = null!;
     private string _activeThemeName = "ember";
+    private static readonly JsonSerializerOptions OutgoingLogOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = false
+    };
 
     public MudClientApp(MudClientConfig config, string configPath)
     {
@@ -212,7 +227,7 @@ public sealed class MudClientApp : IDisposable
             X = 0,
             Y = Pos.Bottom(_macrosFrame),
             Width = Dim.Fill(),
-            Height = Dim.Fill()
+            Height = 14
         };
 
         var initialBand = _config.RangeBands.FirstOrDefault() ?? "unknown";
@@ -239,9 +254,62 @@ public sealed class MudClientApp : IDisposable
 
         ringFrame.Add(_ringInfoLabel, _ringView);
 
-        sidebar.Add(_macrosFrame, ringFrame);
+        _rosterFrame = new FrameView("Nearby Entities")
+        {
+            X = 0,
+            Y = Pos.Bottom(ringFrame),
+            Width = Dim.Fill(),
+            Height = Dim.Fill()
+        };
+
+        _entityListView = new ListView(Array.Empty<string>())
+        {
+            X = 0,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = Dim.Fill(3)
+        };
+        _entityListView.SelectedItemChanged += _ => UpdateEntityActionState();
+
+        var entityActionBar = new View
+        {
+            X = 0,
+            Y = Pos.Bottom(_entityListView),
+            Width = Dim.Fill(),
+            Height = 2
+        };
+
+        _approachButton = new Button("Approach")
+        {
+            X = 0,
+            Y = 0,
+            Enabled = false
+        };
+        _approachButton.Clicked += () => _ = MoveRelativeToEntityAsync(true);
+
+        _evadeButton = new Button("Evade")
+        {
+            X = Pos.Right(_approachButton) + 1,
+            Y = 0,
+            Enabled = false
+        };
+        _evadeButton.Clicked += () => _ = MoveRelativeToEntityAsync(false);
+
+        _entityActionLabel = new Label("Select an entity")
+        {
+            X = 0,
+            Y = 1,
+            Width = Dim.Fill(),
+            Height = 1
+        };
+
+        entityActionBar.Add(_approachButton, _evadeButton, _entityActionLabel);
+        _rosterFrame.Add(_entityListView, entityActionBar);
+
+        sidebar.Add(_macrosFrame, ringFrame, _rosterFrame);
 
         window.Add(header, logFrame, inputFrame, sidebar);
+        RefreshEntityRoster();
     }
 
     private void BuildMacroButtons()
@@ -309,12 +377,13 @@ public sealed class MudClientApp : IDisposable
                     UpdateAuthState(message.Payload);
                 }
 
-                foreach (var line in _router.Handle(message))
+                foreach (var line in _router.Handle(message, _config.ShowDiagnosticInfo))
                 {
                     AppendLogLine(line);
                 }
                 RefreshTargetState();
                 RefreshMovementState();
+                RefreshEntityRoster();
 
                 if (_pendingCharacterDialog)
                 {
@@ -371,13 +440,20 @@ public sealed class MudClientApp : IDisposable
 
     private async Task SendMessageAsync(string type, object payload)
     {
+        if (!EnsureConnectedForSend())
+        {
+            return;
+        }
+
         if (_sendMode == SocketMessageMode.Event)
         {
+            LogOutgoing(type, payload);
             await _transport.SendAsync(type, payload);
             return;
         }
 
         var message = new OutgoingMessage(type, payload, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        LogOutgoing(_config.SendEventName, message);
         await _transport.SendAsync(_config.SendEventName, message);
     }
 
@@ -385,11 +461,17 @@ public sealed class MudClientApp : IDisposable
     {
         try
         {
+            if (!EnsureConnectedForSend())
+            {
+                return;
+            }
+
             using var doc = JsonDocument.Parse(json);
             if (_sendMode == SocketMessageMode.Event)
             {
                 string? eventName = null;
                 JsonElement payload = doc.RootElement.Clone();
+                var payloadJson = doc.RootElement.GetRawText();
 
                 if (doc.RootElement.TryGetProperty("event", out var eventProp))
                 {
@@ -397,6 +479,7 @@ public sealed class MudClientApp : IDisposable
                     if (doc.RootElement.TryGetProperty("payload", out var payloadProp))
                     {
                         payload = payloadProp.Clone();
+                        payloadJson = payloadProp.GetRawText();
                     }
                 }
                 else if (doc.RootElement.TryGetProperty("type", out var typeProp))
@@ -405,6 +488,7 @@ public sealed class MudClientApp : IDisposable
                     if (doc.RootElement.TryGetProperty("payload", out var payloadProp))
                     {
                         payload = payloadProp.Clone();
+                        payloadJson = payloadProp.GetRawText();
                     }
                 }
 
@@ -413,10 +497,13 @@ public sealed class MudClientApp : IDisposable
                     eventName = _config.SendEventName;
                 }
 
+                LogOutgoingJson(eventName!, payloadJson);
                 await _transport.SendAsync(eventName!, payload);
                 return;
             }
 
+            var rawJson = doc.RootElement.GetRawText();
+            LogOutgoingJson(_config.SendEventName, rawJson);
             await _transport.SendAsync(_config.SendEventName, doc.RootElement.Clone());
         }
         catch (JsonException)
@@ -439,7 +526,7 @@ public sealed class MudClientApp : IDisposable
 
         if (text.StartsWith("/"))
         {
-            HandleClientCommand(text[1..]);
+            _ = SendSlashCommandAsync(text);
             return;
         }
 
@@ -499,6 +586,18 @@ public sealed class MudClientApp : IDisposable
 
         var payload = new { text };
         await SendMessageAsync(_config.DefaultCommandType, payload);
+        AppendLogLine($"> {text}");
+    }
+
+    private async Task SendSlashCommandAsync(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        var payload = new { command = text, timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+        await SendMessageAsync("command", payload);
         AppendLogLine($"> {text}");
     }
 
@@ -566,6 +665,225 @@ public sealed class MudClientApp : IDisposable
         _movementLabel.Text = $"Movement: {speed} | Facing: {heading} | Available: {directions}";
     }
 
+    private void RefreshEntityRoster()
+    {
+        var entries = BuildNearbyEntities();
+
+        _entityRosterSnapshot.Clear();
+        _entityRosterSnapshot.AddRange(entries);
+
+        var lines = entries.Select(FormatNearbyEntityLine).ToList();
+        if (lines.Count == 0)
+        {
+            lines.Add("No nearby entities.");
+        }
+
+        _entityListView.SetSource(lines);
+        var sourceCount = _entityListView.Source.Count;
+        if (sourceCount > 0)
+        {
+            _entityListView.SelectedItem = Math.Clamp(_entityListView.SelectedItem, 0, sourceCount - 1);
+        }
+        else
+        {
+            _entityListView.SelectedItem = -1;
+        }
+
+        UpdateEntityActionState();
+    }
+
+    private string FormatNearbyEntityLine(NearbyEntityInfo entity)
+    {
+        var name = GetEntityDisplayName(entity);
+        var type = string.IsNullOrWhiteSpace(entity.Type) ? "entity" : entity.Type;
+        var bearingText = entity.Bearing.HasValue
+            ? $"{(int)Math.Round(NormalizeHeading(entity.Bearing.Value)):000}deg"
+            : "bearing ?";
+        var elevationDisplay = entity.Elevation.HasValue
+            ? $"{(entity.Elevation >= 0 ? "+" : string.Empty)}{entity.Elevation:0.#}ft"
+            : "elev ?";
+        var rangeDisplay = FormatDistance(entity.Range);
+
+        return $"{name} ({type}) - {bearingText} | elev {elevationDisplay} | {rangeDisplay}";
+    }
+
+    private string GetEntityDisplayName(NearbyEntityInfo entity)
+    {
+        return string.IsNullOrWhiteSpace(entity.Name) ? entity.Id : entity.Name;
+    }
+
+    private string FormatDistance(double? value)
+    {
+        return value.HasValue ? $"{value.Value:0.#}ft range" : "range ?";
+    }
+
+    private void UpdateEntityActionState()
+    {
+        var entity = GetSelectedNearbyEntity();
+        if (entity is NearbyEntityInfo selected)
+        {
+            _approachButton.Enabled = true;
+            _evadeButton.Enabled = true;
+            _entityActionLabel.Text = $"{GetEntityDisplayName(selected)} - {FormatDistance(selected.Range)}";
+        }
+        else
+        {
+            _approachButton.Enabled = false;
+            _evadeButton.Enabled = false;
+            _entityActionLabel.Text = "Select an entity to approach or evade.";
+        }
+    }
+
+    private NearbyEntityInfo? GetSelectedNearbyEntity()
+    {
+        if (_entityRosterSnapshot.Count == 0)
+        {
+            return null;
+        }
+
+        var index = _entityListView.SelectedItem;
+        if (index < 0 || index >= _entityRosterSnapshot.Count)
+        {
+            return null;
+        }
+
+        return _entityRosterSnapshot[index];
+    }
+
+    private async Task MoveRelativeToEntityAsync(bool approach)
+    {
+        var entity = GetSelectedNearbyEntity();
+        if (!entity.HasValue)
+        {
+            AppendLogLine("Select an entity first.");
+            return;
+        }
+
+        var heading = DetermineHeadingForEntity(entity.Value, approach);
+        if (!heading.HasValue)
+        {
+            AppendLogLine($"Bearing is unknown for {GetEntityDisplayName(entity.Value)}.");
+            return;
+        }
+
+        var speed = approach ? "walk" : "run";
+        var movement = new MovementCommand(speed, heading, null);
+        await SendMovementCommandAsync(movement);
+        var verb = approach ? "Approaching" : "Evading";
+        AppendLogLine($"{verb} {GetEntityDisplayName(entity.Value)} ({heading.Value}deg).");
+    }
+
+    private int? DetermineHeadingForEntity(NearbyEntityInfo entity, bool approach)
+    {
+        if (!entity.Bearing.HasValue)
+        {
+            return null;
+        }
+
+        var heading = NormalizeHeading((int)Math.Round(entity.Bearing.Value));
+        if (!approach)
+        {
+            heading = NormalizeHeading(heading + 180);
+        }
+
+        return heading;
+    }
+
+    private static double? CalculateBearingFromDelta(Vector3 delta)
+    {
+        var horizontal = Math.Sqrt(delta.X * delta.X + delta.Z * delta.Z);
+        if (horizontal < 0.001)
+        {
+            return null;
+        }
+
+        var angle = Math.Atan2(delta.X, -delta.Z) * 180.0 / Math.PI;
+        return NormalizeHeading(angle);
+    }
+
+    private static int NormalizeHeading(int angle)
+    {
+        var normalized = angle % 360;
+        if (normalized < 0)
+        {
+            normalized += 360;
+        }
+
+        return normalized;
+    }
+
+    private static double NormalizeHeading(double angle)
+    {
+        var normalized = angle % 360.0;
+        if (normalized < 0)
+        {
+            normalized += 360.0;
+        }
+
+        return normalized;
+    }
+
+    private List<NearbyEntityInfo> BuildNearbyEntities()
+    {
+        if (_state.ProximityRoster.HasEntities())
+        {
+            return _state.ProximityRoster.GetEntitiesForNavigation()
+                .Select(entity => new NearbyEntityInfo(
+                    entity.Id,
+                    entity.Name,
+                    entity.Type,
+                    entity.Bearing,
+                    entity.Elevation,
+                    entity.Range))
+                .OrderBy(entity => entity.Range ?? double.MaxValue)
+                .ThenBy(entity => entity.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        return _state.Entities
+            .Where(e => !string.IsNullOrWhiteSpace(e.Name) || !string.IsNullOrWhiteSpace(e.Type))
+            .Select(entity => new NearbyEntityInfo(
+                entity.Id,
+                entity.Name,
+                entity.Type,
+                entity.Bearing,
+                GetElevationForEntity(entity),
+                GetRangeForEntity(entity)))
+            .OrderBy(entity => entity.Range ?? double.MaxValue)
+            .ThenBy(entity => entity.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private double? GetElevationForEntity(EntityInfo entity)
+    {
+        if (entity.Elevation.HasValue)
+        {
+            return entity.Elevation;
+        }
+
+        if (_state.PlayerPosition.HasValue && entity.Position.HasValue)
+        {
+            return entity.Position.Value.Y - _state.PlayerPosition.Value.Y;
+        }
+
+        return null;
+    }
+
+    private double? GetRangeForEntity(EntityInfo entity)
+    {
+        if (entity.Range.HasValue)
+        {
+            return entity.Range;
+        }
+
+        if (_state.PlayerPosition.HasValue && entity.Position.HasValue)
+        {
+            return _state.PlayerPosition.Value.DistanceTo(entity.Position.Value);
+        }
+
+        return null;
+    }
+
     private void AppendLogLine(string line)
     {
         var formatted = _showTimestamps
@@ -584,7 +902,8 @@ public sealed class MudClientApp : IDisposable
 
     private void ShowHelp()
     {
-        AppendLogLine("Client commands: /help /connect /disconnect /handshake /auth /select /create /target /clear-target /ping /raw /reload /theme /quit");
+        AppendLogLine("Slash commands are forwarded to the server.");
+        AppendLogLine("Use the menu or function keys for connect/login/theme/reload/quit actions.");
         AppendLogLine("Use macros for quick actions. Use the ring to send position intents relative to the current target.");
     }
 
@@ -799,6 +1118,52 @@ public sealed class MudClientApp : IDisposable
         return field.Text?.ToString() ?? string.Empty;
     }
 
+
+    private void LogOutgoing(string eventName, object payload)
+    {
+        if (!_config.ShowDiagnosticInfo)
+        {
+            return;
+        }
+
+        string body;
+        try
+        {
+            body = JsonSerializer.Serialize(payload, OutgoingLogOptions);
+        }
+        catch
+        {
+            body = payload?.ToString() ?? "null";
+        }
+
+        AppendLogLine($">>> {eventName}: {body}");
+    }
+
+    private void LogOutgoingJson(string eventName, string payloadJson)
+    {
+        if (!_config.ShowDiagnosticInfo)
+        {
+            return;
+        }
+
+        AppendLogLine($">>> {eventName}: {payloadJson}");
+    }
+
+    private bool EnsureConnectedForSend()
+    {
+        if (_transport.IsConnected)
+        {
+            return true;
+        }
+
+        if (_config.ShowDiagnosticInfo)
+        {
+            AppendLogLine("Send skipped: socket not connected.");
+        }
+
+        return false;
+    }
+
     private async Task SendMovementCommandAsync(MovementCommand movement)
     {
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -935,6 +1300,13 @@ public sealed class MudClientApp : IDisposable
     }
 
     private readonly record struct MovementCommand(string Speed, int? Heading, string? Compass);
+    private readonly record struct NearbyEntityInfo(
+        string Id,
+        string Name,
+        string Type,
+        double? Bearing,
+        double? Elevation,
+        double? Range);
 
     private void ReloadConfig()
     {
@@ -953,6 +1325,7 @@ public sealed class MudClientApp : IDisposable
         _config.PositionCommandTemplate = updated.PositionCommandTemplate;
         _config.RangeBands = updated.RangeBands;
         _config.Macros = updated.Macros;
+        _config.ShowDiagnosticInfo = updated.ShowDiagnosticInfo;
 
         _sendMode = SocketMessageModeParser.Parse(_config.SendMode, SocketMessageMode.Event);
         _receiveMode = SocketMessageModeParser.Parse(_config.ReceiveMode, SocketMessageMode.Event);
@@ -1181,6 +1554,11 @@ public sealed class MudClientApp : IDisposable
         _targetLabel.ColorScheme = scheme;
         _movementLabel.ColorScheme = scheme;
         _ringInfoLabel.ColorScheme = scheme;
+        _rosterFrame.ColorScheme = scheme;
+        _entityListView.ColorScheme = scheme;
+        _approachButton.ColorScheme = scheme;
+        _evadeButton.ColorScheme = scheme;
+        _entityActionLabel.ColorScheme = scheme;
 
         Application.Top.SetNeedsDisplay();
         _window.SetNeedsDisplay();

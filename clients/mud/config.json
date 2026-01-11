@@ -1,5 +1,5 @@
 {
-  "serverUrl": "http://localhost:3000",
+  "serverUrl": "http://localhost:3100",
   "sendMode": "event",
   "receiveMode": "event",
   "sendEventName": "message",
@@ -7,8 +7,9 @@
   "protocolVersion": "1.0.0",
   "clientVersion": "0.1.0",
   "maxUpdateRate": 1,
-  "autoConnect": false,
-  "defaultCommandType": "command",
+  "showDiagnosticInfo": true,
+  "autoConnect": true,
+  "defaultCommandType": "chat",
   "theme": "ember",
   "customTheme": {
     "normalForeground": "BrightWhite",
@@ -32,7 +33,6 @@
     { "label": "Stop", "command": "Stop" },
     { "label": "Look", "command": "look" },
     { "label": "Who", "command": "who" },
-    { "label": "Inv", "command": "inventory" },
-    { "label": "Attack", "command": "attack" }
+    { "label": "Inv", "command": "inventory" }
   ]
 }

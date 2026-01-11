@@ -1,7 +1,7 @@
 # MUD Client Config
 
 The client reads a JSON config at startup. Default path:
-`clients/mud/config.json`
+`client/mud/config.json`
 
 ## Fields
 
@@ -13,7 +13,8 @@ The client reads a JSON config at startup. Default path:
 - `protocolVersion`: Protocol version sent in the handshake.
 - `clientVersion`: Client version string.
 - `maxUpdateRate`: Max updates per second this client can handle.
-- `autoConnect`: If true, connect on startup.
+- `showDiagnosticInfo`: When true, the log keeps handshake/auth/state diagnostics and echoes outgoing events so you can confirm what the client is sending; set it to `false` for a purer chat/movement feed.
+- `autoConnect`: If true, connect on startup (default: true).
 - `defaultCommandType`: Message type used for typed commands (default: `command`).
 - `theme`: Theme name (`ember`, `dusk`, `terminal`, `parchment`, or `custom`).
 - `customTheme`: Optional color overrides used when `theme` is `custom`.
