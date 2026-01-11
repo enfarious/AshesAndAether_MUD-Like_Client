@@ -78,6 +78,7 @@ public sealed class MessageRouter
                 }
                 yield break;
             case "communication":
+            case "chat":
                 foreach (var line in RenderCommunication(message.Payload))
                 {
                     yield return line;
@@ -322,22 +323,37 @@ public sealed class MessageRouter
 
     private IEnumerable<string> RenderCommunication(JsonElement payload)
     {
-        var type = payload.GetPropertyOrDefault("type")?.GetString() ?? "say";
-        var senderName = payload.GetPropertyOrDefault("senderName")?.GetString() ?? "Unknown";
-        var content = payload.GetPropertyOrDefault("content")?.GetString() ?? string.Empty;
-        var distance = GetNumber(payload.GetPropertyOrDefault("distance"));
-
-        var rangeTag = type.ToUpperInvariant();
-        var distanceText = distance.HasValue ? $" ({Math.Floor(distance.Value)}ft)" : string.Empty;
+        var type = payload.GetPropertyOrDefault("channel")?.GetString()
+            ?? payload.GetPropertyOrDefault("type")?.GetString()
+            ?? "say";
+        var senderName = payload.GetPropertyOrDefault("sender")?.GetString()
+            ?? payload.GetPropertyOrDefault("senderName")?.GetString()
+            ?? "Unknown";
+        var content = payload.GetPropertyOrDefault("message")?.GetString()
+            ?? payload.GetPropertyOrDefault("content")?.GetString()
+            ?? string.Empty;
 
         if (string.Equals(type, "emote", StringComparison.OrdinalIgnoreCase))
         {
-            yield return $"[{rangeTag}] {senderName} {content}".TrimEnd();
+            if (!string.IsNullOrWhiteSpace(senderName) &&
+                content.StartsWith(senderName + " ", StringComparison.OrdinalIgnoreCase))
+            {
+                yield return content.TrimEnd();
+                yield break;
+            }
+            yield return $"{senderName} {content}".TrimEnd();
             yield break;
         }
 
-        var quoted = string.IsNullOrWhiteSpace(content) ? string.Empty : $"\"{content}\"";
-        yield return $"[{rangeTag}] {senderName}{distanceText}: {quoted}".TrimEnd();
+        if (string.Equals(type, "cfh", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(type, "callforhelp", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return $"{senderName} calls for help! ({content})".TrimEnd();
+            yield break;
+        }
+
+        var verb = string.Equals(type, "shout", StringComparison.OrdinalIgnoreCase) ? "shouts" : "says";
+        yield return $"{senderName} {verb}, {content}".TrimEnd();
     }
 
     private IEnumerable<string> RenderCommandResponse(JsonElement payload)

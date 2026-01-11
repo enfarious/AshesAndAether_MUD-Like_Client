@@ -12,9 +12,11 @@ public sealed class MudClientConfig
     public string ProtocolVersion { get; set; } = "1.0.0";
     public string ClientVersion { get; set; } = "0.1.0";
     public int MaxUpdateRate { get; set; } = 1;
-    public bool AutoConnect { get; set; } = true;
+    public bool AutoConnect { get; set; } = false;
     public string DefaultCommandType { get; set; } = "command";
     public string Theme { get; set; } = "ember";
+    public string NavRingStyle { get; set; } = "ring";
+    public NavRingThemeConfig NavRingTheme { get; set; } = new();
     public ThemeConfig CustomTheme { get; set; } = new();
     public string PositionCommandTemplate { get; set; } = "position {target} {range_band} {angle_deg}";
     public List<string> RangeBands { get; set; } = new()
@@ -40,6 +42,13 @@ public sealed class MudClientConfig
 
         var contents = File.ReadAllText(path);
         return JsonSerializer.Deserialize<MudClientConfig>(contents, JsonOptions) ?? new MudClientConfig();
+    }
+
+    public void Save(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
+        var json = JsonSerializer.Serialize(this, JsonOptions);
+        File.WriteAllText(path, json);
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new()

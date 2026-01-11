@@ -11,9 +11,13 @@ namespace WodMudClient;
 public sealed class MudClientApp : IDisposable
 {
     private const int MaxLogLines = 2000;
+    private static readonly string[] NavigationSpeeds = { "run", "jog", "walk" };
 
     private readonly MudClientConfig _config;
     private readonly string _configPath;
+    private readonly string _connectionsPath;
+    private readonly ConnectionStore _connectionStore = new();
+    private ConnectionsFile _connections = new();
     private readonly SocketIoTransport _transport = new();
     private readonly StateStore _state = new();
     private readonly MacroEngine _macroEngine = new();
@@ -35,32 +39,50 @@ public sealed class MudClientApp : IDisposable
     private Label _statusLabel = null!;
     private Label _targetLabel = null!;
     private Label _movementLabel = null!;
+    private FrameView _logFrame = null!;
+    private View _sidebar = null!;
+    private Label _navPositionLabel = null!;
+    private Label _navHeadingLabel = null!;
     private Label _ringInfoLabel = null!;
     private PositionRingView _ringView = null!;
-    private FrameView _macrosFrame = null!;
+    private FrameView _navigationFrame = null!;
     private FrameView _rosterFrame = null!;
     private ListView _entityListView = null!;
     private Button _approachButton = null!;
-    private Button _evadeButton = null!;
+    private Button _withdrawButton = null!;
+    private Button _examineButton = null!;
+    private Button _talkButton = null!;
+    private Button _greetButton = null!;
+    private Button _engageToggleButton = null!;
+    private readonly HashSet<string> _engagedEntities = new(StringComparer.OrdinalIgnoreCase);
     private Label _entityActionLabel = null!;
     private readonly List<NearbyEntityInfo> _entityRosterSnapshot = new();
     private MenuBar _menuBar = null!;
     private StatusBar _statusBar = null!;
     private Window _window = null!;
     private string _activeThemeName = "ember";
+    private ConnectionProfile? _activeConnection;
+    private string? _activeAccountName;
+    private string? _activeCharacterName;
+    private string? _activeWorldName;
+    private bool _isConnected;
+    private AppearanceSettings _defaultAppearance;
     private static readonly JsonSerializerOptions OutgoingLogOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = false
     };
 
-    public MudClientApp(MudClientConfig config, string configPath)
+    public MudClientApp(MudClientConfig config, string configPath, string connectionsPath)
     {
         _config = config;
         _configPath = configPath;
+        _connectionsPath = connectionsPath;
+        _connections = _connectionStore.Load(_connectionsPath);
         _router = new MessageRouter(_state);
         _sendMode = SocketMessageModeParser.Parse(_config.SendMode, SocketMessageMode.Event);
         _receiveMode = SocketMessageModeParser.Parse(_config.ReceiveMode, SocketMessageMode.Event);
+        _defaultAppearance = BuildAppearanceFromConfig(_config);
     }
 
     public void Run()
@@ -69,10 +91,11 @@ public sealed class MudClientApp : IDisposable
         BuildUi();
         WireTransport();
 
-        if (_config.AutoConnect)
+        Application.MainLoop.AddTimeout(TimeSpan.FromMilliseconds(1), _ =>
         {
-            _ = ConnectAsync(_config.ServerUrl);
-        }
+            ShowConnectionsDialog(showOnLaunch: true);
+            return false;
+        });
 
         Application.Run();
         Application.Shutdown();
@@ -88,12 +111,19 @@ public sealed class MudClientApp : IDisposable
             {
                 new MenuItem("_Connect", "", () => _ = ConnectAsync(_config.ServerUrl)),
                 new MenuItem("_Disconnect", "", () => _ = DisconnectAsync()),
-                new MenuItem("_Login", "", ShowLoginDialog)
+                new MenuItem("_Login", "", ShowLoginDialog),
+                new MenuItem("C_onnections", "", () => ShowConnectionsDialog(showOnLaunch: false))
             }),
             new MenuBarItem("_View", new[]
             {
                 new MenuItem("_Toggle Timestamps", "", ToggleTimestamps),
                 new MenuItem("_Reload Config", "", ReloadConfig),
+                new MenuItem("_Settings", "", ShowSettingsDialog)
+            }),
+            new MenuBarItem("_Navigation", new[]
+            {
+                new MenuItem("_Ring", "", () => SetNavigationStyle(NavigationRingStyle.Ring)),
+                new MenuItem("_Grid", "", () => SetNavigationStyle(NavigationRingStyle.Grid))
             }),
             new MenuBarItem("_Themes", BuildThemeMenuItems())
         });
@@ -124,7 +154,18 @@ public sealed class MudClientApp : IDisposable
 
     private void BuildMainLayout(Window window)
     {
-        var sidebarWidth = 32;
+        const int sidebarWidthPercent = 32;
+        const int sidebarMinWidth = 40;
+        int GetSidebarWidth(int totalWidth)
+        {
+            if (totalWidth <= 0)
+            {
+                return 0;
+            }
+
+            var width = Math.Max(sidebarMinWidth, (int)Math.Round(totalWidth * (sidebarWidthPercent / 100.0)));
+            return Math.Clamp(width, Math.Min(sidebarMinWidth, totalWidth), totalWidth);
+        }
 
         var header = new FrameView("Session")
         {
@@ -160,11 +201,11 @@ public sealed class MudClientApp : IDisposable
 
         header.Add(_statusLabel, _targetLabel, _movementLabel);
 
-        var logFrame = new FrameView("Log")
+        _logFrame = new FrameView("Log")
         {
             X = 0,
             Y = Pos.Bottom(header),
-            Width = Dim.Fill(sidebarWidth),
+            Width = Dim.Fill(),
             Height = Dim.Fill(4)
         };
 
@@ -177,12 +218,12 @@ public sealed class MudClientApp : IDisposable
             ReadOnly = true,
             WordWrap = true
         };
-        logFrame.Add(_logView);
+        _logFrame.Add(_logView);
 
         var inputFrame = new FrameView("Input")
         {
             X = 0,
-            Y = Pos.Bottom(logFrame),
+            Y = Pos.Bottom(_logFrame),
             Width = Dim.Fill(),
             Height = 4
         };
@@ -205,33 +246,23 @@ public sealed class MudClientApp : IDisposable
 
         inputFrame.Add(_inputField, sendButton);
 
-        var sidebar = new View
+        _sidebar = new View
         {
-            X = Pos.Right(logFrame),
+            X = 0,
             Y = Pos.Bottom(header),
-            Width = sidebarWidth,
+            Width = sidebarMinWidth,
             Height = Dim.Fill(4)
         };
 
-        _macrosFrame = new FrameView("Macros")
+        _navigationFrame = new FrameView("Navigation")
         {
             X = 0,
             Y = 0,
             Width = Dim.Fill(),
-            Height = Dim.Fill(12)
-        };
-        BuildMacroButtons();
-
-        var ringFrame = new FrameView("Position")
-        {
-            X = 0,
-            Y = Pos.Bottom(_macrosFrame),
-            Width = Dim.Fill(),
-            Height = 14
+            Height = 11
         };
 
-        var initialBand = _config.RangeBands.FirstOrDefault() ?? "unknown";
-        _ringInfoLabel = new Label($"Angle: 0 deg  Band: {initialBand}")
+        _navPositionLabel = new Label("Loc: unknown")
         {
             X = 1,
             Y = 0,
@@ -239,25 +270,45 @@ public sealed class MudClientApp : IDisposable
             Height = 1
         };
 
-        _ringView = new PositionRingView
+        _navHeadingLabel = new Label("Head: -- Spd: idle")
         {
             X = 1,
             Y = 1,
-            Width = Dim.Fill(1),
-            Height = Dim.Fill(1),
+            Width = Dim.Fill(),
+            Height = 1
+        };
+
+        var initialSpeed = NavigationSpeeds.LastOrDefault() ?? "walk";
+        _ringInfoLabel = new Label($"Select: N {initialSpeed}")
+        {
+            X = 1,
+            Y = 2,
+            Width = Dim.Fill(),
+            Height = 1
+        };
+
+        _ringView = new PositionRingView
+        {
+            X = 1,
+            Y = 3,
+            Width = Dim.Fill(),
+            Height = Dim.Fill(),
             CanFocus = true,
-            RangeBands = _config.RangeBands,
+            RangeBands = NavigationSpeeds,
+            AngleStep = 45,
             WantMousePositionReports = true
         };
+        _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
         _ringView.SelectionConfirmed += OnRingSelectionConfirmed;
         _ringView.SelectionChanged += OnRingSelectionChanged;
+        _ringView.StopRequested += OnRingStopRequested;
 
-        ringFrame.Add(_ringInfoLabel, _ringView);
+        _navigationFrame.Add(_navPositionLabel, _navHeadingLabel, _ringInfoLabel, _ringView);
 
         _rosterFrame = new FrameView("Nearby Entities")
         {
             X = 0,
-            Y = Pos.Bottom(ringFrame),
+            Y = Pos.Bottom(_navigationFrame),
             Width = Dim.Fill(),
             Height = Dim.Fill()
         };
@@ -276,88 +327,100 @@ public sealed class MudClientApp : IDisposable
             X = 0,
             Y = Pos.Bottom(_entityListView),
             Width = Dim.Fill(),
-            Height = 2
+            Height = 3
         };
+
+        _examineButton = new Button("Examine")
+        {
+            X = 0,
+            Y = 0,
+            Enabled = false
+        };
+        _examineButton.Clicked += () => SendEntityCommand("/examine");
+
+        _talkButton = new Button("Talk")
+        {
+            X = Pos.Right(_examineButton) + 1,
+            Y = 0,
+            Enabled = false
+        };
+        _talkButton.Clicked += () => SendEntityCommand("/talk");
+
+        _greetButton = new Button("Greet")
+        {
+            X = Pos.Right(_talkButton) + 1,
+            Y = 0,
+            Enabled = false
+        };
+        _greetButton.Clicked += () => SendEntityCommand("/emote waves at");
 
         _approachButton = new Button("Approach")
         {
             X = 0,
-            Y = 0,
+            Y = 1,
             Enabled = false
         };
         _approachButton.Clicked += () => _ = MoveRelativeToEntityAsync(true);
 
-        _evadeButton = new Button("Evade")
+        _withdrawButton = new Button("Withdraw")
         {
             X = Pos.Right(_approachButton) + 1,
-            Y = 0,
+            Y = 1,
             Enabled = false
         };
-        _evadeButton.Clicked += () => _ = MoveRelativeToEntityAsync(false);
+        _withdrawButton.Clicked += () => _ = MoveRelativeToEntityAsync(false);
+
+        _engageToggleButton = new Button("Engage")
+        {
+            X = Pos.Right(_withdrawButton) + 1,
+            Y = 1,
+            Enabled = false
+        };
+        _engageToggleButton.Clicked += ToggleEngage;
 
         _entityActionLabel = new Label("Select an entity")
         {
             X = 0,
-            Y = 1,
+            Y = 2,
             Width = Dim.Fill(),
             Height = 1
         };
 
-        entityActionBar.Add(_approachButton, _evadeButton, _entityActionLabel);
+        entityActionBar.Add(_examineButton, _talkButton, _greetButton, _approachButton, _withdrawButton, _engageToggleButton, _entityActionLabel);
         _rosterFrame.Add(_entityListView, entityActionBar);
 
-        sidebar.Add(_macrosFrame, ringFrame, _rosterFrame);
+        _sidebar.Add(_navigationFrame, _rosterFrame);
 
-        window.Add(header, logFrame, inputFrame, sidebar);
+        window.Add(header, _logFrame, inputFrame, _sidebar);
         RefreshEntityRoster();
-    }
+        RefreshMovementState();
 
-    private void BuildMacroButtons()
-    {
-        _macrosFrame.RemoveAll();
-
-        var macros = _config.Macros;
-        var columns = 2;
-        var rows = (int)Math.Ceiling(macros.Count / (double)columns);
-        var height = Math.Max(3, rows + 2);
-        _macrosFrame.Height = height;
-
-        for (var i = 0; i < macros.Count; i++)
-        {
-            var macro = macros[i];
-            var row = i / columns;
-            var col = i % columns;
-
-            var button = new Button(macro.Label)
-            {
-                X = col == 0 ? 0 : Pos.Percent(50),
-                Y = row,
-                Width = Dim.Percent(50),
-                Height = 1
-            };
-
-            button.Clicked += () => SendMacro(macro.Command);
-            _macrosFrame.Add(button);
-        }
+        UpdateSidebarLayout(GetSidebarWidth);
+        window.LayoutComplete += _ => UpdateSidebarLayout(GetSidebarWidth);
     }
 
     private void WireTransport()
     {
-        _transport.Connected += () =>
+        _transport.Connected += async () =>
         {
             Application.MainLoop.Invoke(() =>
             {
-                _statusLabel.Text = $"Status: connected ({_config.ServerUrl})";
+                _isConnected = true;
+                RefreshSessionHeader();
                 AppendLogLine("Connected.");
             });
-            _ = SendHandshakeAsync();
+            await SendHandshakeAsync();
+            await TrySendAutoAuthAsync();
         };
 
         _transport.Disconnected += reason =>
         {
             Application.MainLoop.Invoke(() =>
             {
-                _statusLabel.Text = "Status: disconnected";
+                _isConnected = false;
+                _activeWorldName = null;
+                _activeCharacterName = null;
+                RefreshSessionHeader();
                 AppendLogLine($"Disconnected: {reason}");
             });
         };
@@ -375,6 +438,10 @@ public sealed class MudClientApp : IDisposable
                 if (message.Type == "auth_success")
                 {
                     UpdateAuthState(message.Payload);
+                }
+                else if (message.Type == "world_entry")
+                {
+                    ApplyCharacterFromWorldEntry(message.Payload);
                 }
 
                 foreach (var line in _router.Handle(message, _config.ShowDiagnosticInfo))
@@ -399,6 +466,7 @@ public sealed class MudClientApp : IDisposable
         try
         {
             AppendLogLine($"Connecting to {serverUrl}...");
+            RefreshSessionHeader();
             await _transport.ConnectAsync(serverUrl, _config.ReceiveEventName, _receiveMode);
         }
         catch (Exception ex)
@@ -596,8 +664,16 @@ public sealed class MudClientApp : IDisposable
             return;
         }
 
-        var payload = new { command = text, timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
-        await SendMessageAsync("command", payload);
+        if (_sendMode == SocketMessageMode.Event)
+        {
+            LogOutgoing("command", text);
+            await _transport.SendAsync("command", text);
+        }
+        else
+        {
+            var payload = new { command = text, timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+            await SendMessageAsync("command", payload);
+        }
         AppendLogLine($"> {text}");
     }
 
@@ -623,46 +699,102 @@ public sealed class MudClientApp : IDisposable
 
     private void OnRingSelectionChanged(PositionSelection selection)
     {
-        _ringInfoLabel.Text = $"Angle: {selection.AngleDegrees} deg  Band: {selection.RangeBand}";
+        var direction = HeadingToCompass(selection.AngleDegrees);
+        var speed = string.IsNullOrWhiteSpace(selection.RangeBand) ? "walk" : selection.RangeBand.ToLowerInvariant();
+        _ringInfoLabel.Text = $"Select: {direction} {speed}";
     }
 
     private void OnRingSelectionConfirmed(PositionSelection selection)
     {
-        if (string.IsNullOrWhiteSpace(_state.CurrentTargetToken))
+        var direction = HeadingToCompass(selection.AngleDegrees);
+        var speed = string.IsNullOrWhiteSpace(selection.RangeBand) ? "walk" : selection.RangeBand.ToLowerInvariant();
+        _ = SendSlashCommandAsync($"/move compass:{direction} speed:{speed}");
+        _inputField.SetFocus();
+    }
+
+    private void OnRingStopRequested()
+    {
+        _ = SendSlashCommandAsync("/stop");
+        _inputField.SetFocus();
+    }
+
+    private void SetNavigationStyle(NavigationRingStyle style)
+    {
+        _ringView.Style = style;
+        _config.NavRingStyle = style switch
         {
-            AppendLogLine("Select a target before using the ring.");
-            return;
+            NavigationRingStyle.Grid => "grid",
+            _ => "ring"
+        };
+        _ringView.SetNeedsDisplay();
+        SaveAppearanceToActiveProfile();
+        SaveConfig();
+        AppendLogLine($"Navigation style: {_config.NavRingStyle}");
+    }
+
+    private static NavigationRingStyle ParseNavigationRingStyle(string? value)
+    {
+        if (string.Equals(value, "grid", StringComparison.OrdinalIgnoreCase))
+        {
+            return NavigationRingStyle.Grid;
         }
 
-        var context = new MacroContext
-        {
-            TargetToken = _state.CurrentTargetToken,
-            AngleDegrees = selection.AngleDegrees,
-            RangeBand = selection.RangeBand
-        };
-
-        var command = _macroEngine.Resolve(_config.PositionCommandTemplate, context);
-        _ = SendTextCommandAsync(command);
-        _inputField.SetFocus();
+        return NavigationRingStyle.Ring;
     }
 
     private void RefreshTargetState()
     {
         var targetToken = _state.CurrentTargetName ?? _state.CurrentTargetId;
         _targetLabel.Text = $"Target: {(string.IsNullOrWhiteSpace(targetToken) ? "none" : targetToken)}";
-        _ringView.HasTarget = !string.IsNullOrWhiteSpace(targetToken);
+        _ringView.HasTarget = true;
         _ringView.SetNeedsDisplay();
     }
 
     private void RefreshMovementState()
     {
         var speed = string.IsNullOrWhiteSpace(_state.CurrentSpeed) ? "idle" : _state.CurrentSpeed!.ToLowerInvariant();
-        var heading = _state.CurrentHeading.HasValue ? HeadingToCompass(_state.CurrentHeading.Value) : "unknown";
+        var headingDegrees = _state.CurrentHeading.HasValue ? NormalizeHeading(_state.CurrentHeading.Value) : (double?)null;
+        var headingCompass = headingDegrees.HasValue ? HeadingToCompass(headingDegrees.Value) : "unknown";
         var directions = _state.AvailableDirections.Count > 0
             ? $"[{string.Join("] [", _state.AvailableDirections)}]"
             : "none";
 
-        _movementLabel.Text = $"Movement: {speed} | Facing: {heading} | Available: {directions}";
+        _movementLabel.Text = $"Movement: {speed} | Facing: {headingCompass} | Available: {directions}";
+
+        var positionText = _state.PlayerPosition.HasValue
+            ? $"{_state.PlayerPosition.Value.X:0.#},{_state.PlayerPosition.Value.Y:0.#},{_state.PlayerPosition.Value.Z:0.#}"
+            : "unknown";
+        _navPositionLabel.Text = $"Loc: {positionText}";
+        _navHeadingLabel.Text = headingDegrees.HasValue
+            ? $"Head: {(int)Math.Round(headingDegrees.Value):000}deg {headingCompass} Spd: {speed}"
+            : $"Head: -- Spd: {speed}";
+    }
+
+    private void RefreshSessionHeader()
+    {
+        var status = _isConnected ? $"connected ({_config.ServerUrl})" : "disconnected";
+        var world = string.IsNullOrWhiteSpace(_activeWorldName) ? "unknown" : _activeWorldName;
+        var account = string.IsNullOrWhiteSpace(_activeAccountName) ? "?" : _activeAccountName;
+        var character = string.IsNullOrWhiteSpace(_activeCharacterName) ? "?" : _activeCharacterName;
+        _statusLabel.Text = $"Status: {status} | World: {world} | User: {account}/{character}";
+    }
+
+    private void UpdateSidebarLayout(Func<int, int> getSidebarWidth)
+    {
+        if (_window == null)
+        {
+            return;
+        }
+
+        var totalWidth = _window.Bounds.Width;
+        var sidebarWidth = getSidebarWidth(totalWidth);
+        sidebarWidth = Math.Clamp(sidebarWidth, 0, totalWidth);
+        var logWidth = Math.Max(0, totalWidth - sidebarWidth);
+
+        _logFrame.X = 0;
+        _logFrame.Width = logWidth;
+        _sidebar.X = logWidth;
+        _sidebar.Width = sidebarWidth;
     }
 
     private void RefreshEntityRoster()
@@ -722,15 +854,24 @@ public sealed class MudClientApp : IDisposable
         var entity = GetSelectedNearbyEntity();
         if (entity is NearbyEntityInfo selected)
         {
+            _examineButton.Enabled = true;
+            _talkButton.Enabled = true;
+            _greetButton.Enabled = true;
             _approachButton.Enabled = true;
-            _evadeButton.Enabled = true;
+            _withdrawButton.Enabled = true;
+            _engageToggleButton.Enabled = true;
+            UpdateEngageButtonLabel(selected);
             _entityActionLabel.Text = $"{GetEntityDisplayName(selected)} - {FormatDistance(selected.Range)}";
         }
         else
         {
             _approachButton.Enabled = false;
-            _evadeButton.Enabled = false;
-            _entityActionLabel.Text = "Select an entity to approach or evade.";
+            _withdrawButton.Enabled = false;
+            _examineButton.Enabled = false;
+            _talkButton.Enabled = false;
+            _greetButton.Enabled = false;
+            _engageToggleButton.Enabled = false;
+            _entityActionLabel.Text = "Select an entity to act on.";
         }
     }
 
@@ -769,8 +910,75 @@ public sealed class MudClientApp : IDisposable
         var speed = approach ? "walk" : "run";
         var movement = new MovementCommand(speed, heading, null);
         await SendMovementCommandAsync(movement);
-        var verb = approach ? "Approaching" : "Evading";
+        var verb = approach ? "Approaching" : "Withdrawing from";
         AppendLogLine($"{verb} {GetEntityDisplayName(entity.Value)} ({heading.Value}deg).");
+    }
+
+    private void SendEntityCommand(string command)
+    {
+        var entity = GetSelectedNearbyEntity();
+        if (!entity.HasValue)
+        {
+            AppendLogLine("Select an entity first.");
+            return;
+        }
+
+        var token = GetEntityCommandToken(entity.Value);
+        _ = SendSlashCommandAsync($"{command} {token}".Trim());
+        AppendLogLine($"> {command} {token}".Trim());
+    }
+
+    private void ToggleEngage()
+    {
+        var entity = GetSelectedNearbyEntity();
+        if (!entity.HasValue)
+        {
+            AppendLogLine("Select an entity first.");
+            return;
+        }
+
+        var token = GetEntityCommandToken(entity.Value);
+        var key = BuildEngagementKey(entity.Value);
+        if (_engagedEntities.Contains(key))
+        {
+            _engagedEntities.Remove(key);
+            _ = SendSlashCommandAsync($"/disengage {token}".Trim());
+            AppendLogLine($"> /disengage {token}".Trim());
+        }
+        else
+        {
+            _engagedEntities.Add(key);
+            _ = SendSlashCommandAsync($"/engage {token}".Trim());
+            AppendLogLine($"> /engage {token}".Trim());
+        }
+
+        UpdateEngageButtonLabel(entity.Value);
+    }
+
+    private void UpdateEngageButtonLabel(NearbyEntityInfo entity)
+    {
+        var engaged = _engagedEntities.Contains(BuildEngagementKey(entity));
+        _engageToggleButton.Text = engaged ? "Disengage" : "Engage";
+    }
+
+    private string BuildEngagementKey(NearbyEntityInfo entity)
+    {
+        if (!string.IsNullOrWhiteSpace(entity.Id))
+        {
+            return $"id:{entity.Id}";
+        }
+
+        return $"name:{GetEntityCommandToken(entity)}";
+    }
+
+    private string GetEntityCommandToken(NearbyEntityInfo entity)
+    {
+        if (!string.IsNullOrWhiteSpace(entity.Name))
+        {
+            return entity.Name;
+        }
+
+        return entity.Id;
     }
 
     private int? DetermineHeadingForEntity(NearbyEntityInfo entity, bool approach)
@@ -825,9 +1033,10 @@ public sealed class MudClientApp : IDisposable
 
     private List<NearbyEntityInfo> BuildNearbyEntities()
     {
+        List<NearbyEntityInfo> raw;
         if (_state.ProximityRoster.HasEntities())
         {
-            return _state.ProximityRoster.GetEntitiesForNavigation()
+            raw = _state.ProximityRoster.GetEntitiesForNavigation()
                 .Select(entity => new NearbyEntityInfo(
                     entity.Id,
                     entity.Name,
@@ -835,23 +1044,51 @@ public sealed class MudClientApp : IDisposable
                     entity.Bearing,
                     entity.Elevation,
                     entity.Range))
-                .OrderBy(entity => entity.Range ?? double.MaxValue)
-                .ThenBy(entity => entity.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        else
+        {
+            raw = _state.Entities
+                .Where(e => !string.IsNullOrWhiteSpace(e.Name) || !string.IsNullOrWhiteSpace(e.Type))
+                .Select(entity => new NearbyEntityInfo(
+                    entity.Id,
+                    entity.Name,
+                    entity.Type,
+                    entity.Bearing,
+                    GetElevationForEntity(entity),
+                    GetRangeForEntity(entity)))
                 .ToList();
         }
 
-        return _state.Entities
-            .Where(e => !string.IsNullOrWhiteSpace(e.Name) || !string.IsNullOrWhiteSpace(e.Type))
-            .Select(entity => new NearbyEntityInfo(
-                entity.Id,
-                entity.Name,
-                entity.Type,
-                entity.Bearing,
-                GetElevationForEntity(entity),
-                GetRangeForEntity(entity)))
+        return DeduplicateNearbyEntities(raw)
             .OrderBy(entity => entity.Range ?? double.MaxValue)
             .ThenBy(entity => entity.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    private static IEnumerable<NearbyEntityInfo> DeduplicateNearbyEntities(IEnumerable<NearbyEntityInfo> entities)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entity in entities)
+        {
+            var key = BuildEntityKey(entity);
+            if (seen.Add(key))
+            {
+                yield return entity;
+            }
+        }
+    }
+
+    private static string BuildEntityKey(NearbyEntityInfo entity)
+    {
+        if (!string.IsNullOrWhiteSpace(entity.Id))
+        {
+            return $"id:{entity.Id}";
+        }
+
+        var name = string.IsNullOrWhiteSpace(entity.Name) ? "unknown" : entity.Name.Trim();
+        var type = string.IsNullOrWhiteSpace(entity.Type) ? "entity" : entity.Type.Trim();
+        return $"name:{name}|type:{type}";
     }
 
     private double? GetElevationForEntity(EntityInfo entity)
@@ -911,6 +1148,7 @@ public sealed class MudClientApp : IDisposable
     {
         var okButton = new Button("Login");
         var cancelButton = new Button("Cancel");
+        okButton.IsDefault = true;
         var dialog = new Dialog("Authenticate", 60, 20, okButton, cancelButton);
 
         var methodLabel = new Label("Method:")
@@ -997,6 +1235,8 @@ public sealed class MudClientApp : IDisposable
             switch (methodGroup.SelectedItem)
             {
                 case 0:
+                    _activeAccountName = GetFieldText(guestField);
+                    RefreshSessionHeader();
                     _ = SendMessageAsync("auth", new { method = "guest", guestName = GetFieldText(guestField) });
                     AppendLogLine("Auth: guest request sent.");
                     break;
@@ -1006,6 +1246,8 @@ public sealed class MudClientApp : IDisposable
                         MessageBox.ErrorQuery("Auth", "Token required.", "Ok");
                         return;
                     }
+                    _activeAccountName = GetFieldText(tokenField);
+                    RefreshSessionHeader();
                     _ = SendMessageAsync("auth", new { method = "token", token = GetFieldText(tokenField) });
                     AppendLogLine("Auth: token request sent.");
                     break;
@@ -1016,11 +1258,501 @@ public sealed class MudClientApp : IDisposable
                         MessageBox.ErrorQuery("Auth", "Username and password required.", "Ok");
                         return;
                     }
+                    _activeAccountName = GetFieldText(userField);
+                    RefreshSessionHeader();
                     _ = SendMessageAsync("auth", new { method = "credentials", username = GetFieldText(userField), password = GetFieldText(passField) });
                     AppendLogLine("Auth: credentials request sent.");
                     break;
             }
 
+            Application.RequestStop();
+        };
+
+        cancelButton.Clicked += () => Application.RequestStop();
+
+        Application.Run(dialog);
+    }
+
+    private void ShowConnectionsDialog(bool showOnLaunch)
+    {
+        var connectButton = new Button("Connect");
+        var newButton = new Button("New");
+        var editButton = new Button("Edit");
+        var deleteButton = new Button("Delete");
+        var closeButton = new Button("Back");
+        connectButton.IsDefault = true;
+
+        var dialog = new Dialog("Connections", 70, 20, connectButton, newButton, editButton, deleteButton, closeButton);
+
+        var listItems = _connections.Connections
+            .Select(connection => $"{connection.Name} ({connection.Host}:{connection.Port})")
+            .ToList();
+        var listView = new ListView(listItems)
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(2),
+            Height = 8
+        };
+
+        var preferredToggle = new CheckBox(1, 10, "Preferred on launch");
+        var autoConnectToggle = new CheckBox(1, 11, "Auto-connect preferred")
+        {
+            Checked = _config.AutoConnect
+        };
+        var statusLabel = new Label(string.Empty)
+        {
+            X = 1,
+            Y = 13,
+            Width = Dim.Fill(2)
+        };
+
+        dialog.Add(listView, preferredToggle, autoConnectToggle, statusLabel);
+
+        void RefreshList()
+        {
+            listItems = _connections.Connections
+                .Select(connection => $"{connection.Name} ({connection.Host}:{connection.Port})")
+                .ToList();
+            listView.SetSource(listItems);
+            if (listItems.Count == 0)
+            {
+                listView.SelectedItem = -1;
+            }
+            else if (listView.SelectedItem < 0)
+            {
+                listView.SelectedItem = 0;
+            }
+        }
+
+        void UpdatePreferredToggle()
+        {
+            var connection = GetSelectedConnection(listView);
+            if (connection == null)
+            {
+                preferredToggle.Checked = false;
+                return;
+            }
+
+            preferredToggle.Checked = string.Equals(connection.Id, _connections.PreferredConnectionId, StringComparison.OrdinalIgnoreCase);
+        }
+
+        listView.SelectedItemChanged += _ => UpdatePreferredToggle();
+
+        preferredToggle.Toggled += _ =>
+        {
+            var connection = GetSelectedConnection(listView);
+            if (connection == null)
+            {
+                preferredToggle.Checked = false;
+                return;
+            }
+
+            _connections.PreferredConnectionId = preferredToggle.Checked ? connection.Id : null;
+            SaveConnections();
+        };
+
+        autoConnectToggle.Toggled += _ =>
+        {
+            _config.AutoConnect = autoConnectToggle.Checked;
+            SaveConfig();
+        };
+
+        connectButton.Clicked += () =>
+        {
+            var connection = GetSelectedConnection(listView);
+            if (connection == null)
+            {
+                statusLabel.Text = "Select a connection.";
+                return;
+            }
+
+            _connections.PreferredConnectionId = connection.Id;
+            SaveConnections();
+            ConnectToConnection(connection);
+            statusLabel.Text = $"Connecting to {connection.Name}...";
+            Application.RequestStop();
+        };
+
+        newButton.Clicked += () =>
+        {
+            var connection = ShowConnectionEditor(null);
+            if (connection == null)
+            {
+                return;
+            }
+
+            _connections.Connections.Add(connection);
+            SaveConnections();
+            RefreshList();
+        };
+
+        editButton.Clicked += () =>
+        {
+            var connection = GetSelectedConnection(listView);
+            if (connection == null)
+            {
+                statusLabel.Text = "Select a connection to edit.";
+                return;
+            }
+
+            var updated = ShowConnectionEditor(connection);
+            if (updated == null)
+            {
+                return;
+            }
+
+            var index = _connections.Connections.FindIndex(c => string.Equals(c.Id, connection.Id, StringComparison.OrdinalIgnoreCase));
+            if (index >= 0)
+            {
+                _connections.Connections[index] = updated;
+                SaveConnections();
+                RefreshList();
+            }
+        };
+
+        deleteButton.Clicked += () =>
+        {
+            var connection = GetSelectedConnection(listView);
+            if (connection == null)
+            {
+                statusLabel.Text = "Select a connection to delete.";
+                return;
+            }
+
+            var confirm = MessageBox.Query("Delete", $"Delete {connection.Name}?", "Yes", "No");
+            if (confirm != 0)
+            {
+                return;
+            }
+
+            _connections.Connections.Remove(connection);
+            if (string.Equals(_connections.PreferredConnectionId, connection.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                _connections.PreferredConnectionId = null;
+            }
+            SaveConnections();
+            RefreshList();
+            UpdatePreferredToggle();
+        };
+
+        closeButton.Clicked += () => Application.RequestStop();
+
+        RefreshList();
+        UpdatePreferredToggle();
+
+        if (showOnLaunch && _config.AutoConnect)
+        {
+            var preferred = GetPreferredConnection();
+            if (preferred != null)
+            {
+                listView.SelectedItem = _connections.Connections.FindIndex(c => c.Id == preferred.Id);
+                preferredToggle.Checked = true;
+                Application.MainLoop.AddTimeout(TimeSpan.FromMilliseconds(1), _ =>
+                {
+                    ConnectToConnection(preferred);
+                    statusLabel.Text = $"Connecting to {preferred.Name}...";
+                    Application.RequestStop();
+                    return false;
+                });
+            }
+        }
+
+        Application.Run(dialog);
+    }
+
+    private ConnectionProfile? ShowConnectionEditor(ConnectionProfile? existing)
+    {
+        var okButton = new Button(existing == null ? "Create" : "Save");
+        var cancelButton = new Button("Cancel");
+        okButton.IsDefault = true;
+
+        var dialog = new Dialog(existing == null ? "New Connection" : "Edit Connection", 70, 22, okButton, cancelButton);
+
+        var nameLabel = new Label("Name:")
+        {
+            X = 1,
+            Y = 1
+        };
+        var nameField = new TextField(existing?.Name ?? string.Empty)
+        {
+            X = 12,
+            Y = 1,
+            Width = 40
+        };
+
+        var hostLabel = new Label("Host:")
+        {
+            X = 1,
+            Y = 3
+        };
+        var hostField = new TextField(existing?.Host ?? "localhost")
+        {
+            X = 12,
+            Y = 3,
+            Width = 40
+        };
+
+        var portLabel = new Label("Port:")
+        {
+            X = 1,
+            Y = 5
+        };
+        var portField = new TextField(existing?.Port.ToString() ?? "3100")
+        {
+            X = 12,
+            Y = 5,
+            Width = 10
+        };
+
+        var tlsToggle = new CheckBox(1, 7, "Use TLS")
+        {
+            Checked = existing?.UseTls ?? false
+        };
+
+        var authLabel = new Label("Auth:")
+        {
+            X = 1,
+            Y = 9
+        };
+        var authOptions = new[] { (ustring)"Guest", "Token", "Creds" };
+        var authIndex = existing?.AuthMethod?.ToLowerInvariant() switch
+        {
+            "token" => 1,
+            "creds" => 2,
+            _ => 0
+        };
+        var authGroup = new RadioGroup(12, 9, authOptions, authIndex);
+
+        var accountLabel = new Label("Account:")
+        {
+            X = 1,
+            Y = 13
+        };
+        var accountField = new TextField(existing?.AccountName ?? string.Empty)
+        {
+            X = 12,
+            Y = 13,
+            Width = 40
+        };
+
+        var passwordLabel = new Label("Password:")
+        {
+            X = 1,
+            Y = 15
+        };
+        var passwordField = new TextField(existing?.Password ?? string.Empty)
+        {
+            X = 12,
+            Y = 15,
+            Width = 40,
+            Secret = true
+        };
+
+        var characterLabel = new Label("Character:")
+        {
+            X = 1,
+            Y = 17
+        };
+        var characterField = new TextField(existing?.CharacterName ?? string.Empty)
+        {
+            X = 12,
+            Y = 17,
+            Width = 40
+        };
+
+        dialog.Add(
+            nameLabel, nameField,
+            hostLabel, hostField,
+            portLabel, portField,
+            tlsToggle,
+            authLabel, authGroup,
+            accountLabel, accountField,
+            passwordLabel, passwordField,
+            characterLabel, characterField);
+
+        ConnectionProfile? result = null;
+
+        okButton.Clicked += () =>
+        {
+            var name = GetFieldText(nameField).Trim();
+            var host = GetFieldText(hostField).Trim();
+            var portText = GetFieldText(portField).Trim();
+
+            if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(host))
+            {
+                MessageBox.ErrorQuery("Connection", "Name and host are required.", "Ok");
+                return;
+            }
+
+            if (!int.TryParse(portText, out var port))
+            {
+                MessageBox.ErrorQuery("Connection", "Port must be a number.", "Ok");
+                return;
+            }
+
+            result = existing ?? new ConnectionProfile();
+            result.Name = name;
+            result.Host = host;
+            result.Port = port;
+            result.UseTls = tlsToggle.Checked;
+            result.AccountName = GetFieldText(accountField).Trim();
+            result.Password = GetFieldText(passwordField);
+            result.CharacterName = GetFieldText(characterField).Trim();
+            result.AuthMethod = authGroup.SelectedItem switch
+            {
+                1 => "token",
+                2 => "creds",
+                _ => "guest"
+            };
+            Application.RequestStop();
+        };
+
+        cancelButton.Clicked += () => Application.RequestStop();
+
+        Application.Run(dialog);
+        return result;
+    }
+
+    private ConnectionProfile? GetSelectedConnection(ListView listView)
+    {
+        if (listView.SelectedItem < 0 || listView.SelectedItem >= _connections.Connections.Count)
+        {
+            return null;
+        }
+
+        return _connections.Connections[listView.SelectedItem];
+    }
+
+    private ConnectionProfile? GetPreferredConnection()
+    {
+        if (string.IsNullOrWhiteSpace(_connections.PreferredConnectionId))
+        {
+            return null;
+        }
+
+        return _connections.Connections.FirstOrDefault(connection =>
+            string.Equals(connection.Id, _connections.PreferredConnectionId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void ConnectToConnection(ConnectionProfile connection)
+    {
+        _activeConnection = connection;
+        _activeAccountName = connection.AccountName;
+        _activeCharacterName = string.IsNullOrWhiteSpace(connection.CharacterName) ? null : connection.CharacterName;
+        _config.ServerUrl = connection.BuildUrl();
+        ApplyAppearanceForActiveProfile();
+        RefreshSessionHeader();
+        _ = ConnectAsync(_config.ServerUrl);
+    }
+
+    private async Task TrySendAutoAuthAsync()
+    {
+        if (_activeConnection == null)
+        {
+            return;
+        }
+
+        var account = _activeConnection.AccountName;
+        if (string.IsNullOrWhiteSpace(account))
+        {
+            Application.MainLoop.Invoke(ShowLoginDialog);
+            return;
+        }
+
+        _activeAccountName = account;
+        RefreshSessionHeader();
+
+        switch (_activeConnection.AuthMethod.ToLowerInvariant())
+        {
+            case "token":
+                await SendMessageAsync("auth", new { method = "token", token = account });
+                AppendLogLine("Auth: token request sent.");
+                break;
+            case "creds":
+                if (string.IsNullOrWhiteSpace(_activeConnection.Password))
+                {
+                    AppendLogLine("Auth: credentials missing password.");
+                    break;
+                }
+                await SendMessageAsync("auth", new { method = "credentials", username = account, password = _activeConnection.Password });
+                AppendLogLine("Auth: credentials request sent.");
+                break;
+            default:
+                await SendMessageAsync("auth", new { method = "guest", guestName = account });
+                AppendLogLine("Auth: guest request sent.");
+                break;
+        }
+    }
+
+    private void ShowSettingsDialog()
+    {
+        var saveButton = new Button("Save");
+        var cancelButton = new Button("Cancel");
+        saveButton.IsDefault = true;
+        var dialog = new Dialog("Settings", 70, 22, saveButton, cancelButton);
+
+        var themeLabel = new Label("Theme:")
+        {
+            X = 1,
+            Y = 1
+        };
+        var themes = GetAvailableThemes().ToList();
+        var themeList = new ListView(themes)
+        {
+            X = 12,
+            Y = 1,
+            Width = 20,
+            Height = 5
+        };
+
+        var navStyleLabel = new Label("Nav style:")
+        {
+            X = 1,
+            Y = 7
+        };
+        var navStyleGroup = new RadioGroup(12, 7, new[] { (ustring)"Ring", "Grid" }, _ringView.Style == NavigationRingStyle.Grid ? 1 : 0);
+
+        var navFgLabel = new Label("Nav fg:")
+        {
+            X = 1,
+            Y = 11
+        };
+        var navFgField = new TextField(_config.NavRingTheme.Foreground ?? string.Empty)
+        {
+            X = 12,
+            Y = 11,
+            Width = 20
+        };
+
+        var navBgLabel = new Label("Nav bg:")
+        {
+            X = 1,
+            Y = 13
+        };
+        var navBgField = new TextField(_config.NavRingTheme.Background ?? string.Empty)
+        {
+            X = 12,
+            Y = 13,
+            Width = 20
+        };
+
+        dialog.Add(themeLabel, themeList, navStyleLabel, navStyleGroup, navFgLabel, navFgField, navBgLabel, navBgField);
+
+        var selectedThemeIndex = themes.FindIndex(name => string.Equals(name, _config.Theme, StringComparison.OrdinalIgnoreCase));
+        themeList.SelectedItem = selectedThemeIndex < 0 ? 0 : selectedThemeIndex;
+
+        saveButton.Clicked += () =>
+        {
+            var theme = themes.ElementAtOrDefault(themeList.SelectedItem) ?? _config.Theme;
+            _config.Theme = theme;
+            _config.NavRingStyle = navStyleGroup.SelectedItem == 1 ? "grid" : "ring";
+            _config.NavRingTheme.Foreground = GetFieldText(navFgField).Trim();
+            _config.NavRingTheme.Background = GetFieldText(navBgField).Trim();
+            _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
+            ApplyTheme(_config.Theme, logChange: true);
+            SaveAppearanceToActiveProfile();
+            SaveConfig();
             Application.RequestStop();
         };
 
@@ -1036,13 +1768,11 @@ public sealed class MudClientApp : IDisposable
             AppendLogLine("No characters available.");
             return;
         }
+        var actionButton = new Button("Choose");
+        var backButton = new Button("Back");
+        actionButton.IsDefault = true;
 
-        var selectButton = new Button("Select");
-        var createButton = new Button("Create");
-        var cancelButton = new Button("Close");
-        createButton.Enabled = _canCreateCharacter;
-
-        var dialog = new Dialog("Character Select", 70, 20, selectButton, createButton, cancelButton);
+        var dialog = new Dialog("Character", 70, 20, actionButton, backButton);
 
         var listLabel = new Label("Characters:")
         {
@@ -1060,51 +1790,99 @@ public sealed class MudClientApp : IDisposable
             Height = 8
         };
 
-        var nameLabel = new Label("New name:")
+        var nameLabel = new Label("Name:")
         {
             X = 1,
             Y = 11
         };
         var nameField = new TextField(string.Empty)
         {
-            X = 12,
+            X = 8,
             Y = 11,
             Width = 30
         };
 
         dialog.Add(listLabel, listView, nameLabel, nameField);
+        nameField.SetFocus();
 
-        selectButton.Clicked += () =>
+        void UpdateActionState()
         {
+            var name = GetFieldText(nameField).Trim();
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                if (TryFindCharacter(name, out _))
+                {
+                    actionButton.Text = "Choose";
+                    actionButton.Enabled = true;
+                }
+                else
+                {
+                    actionButton.Text = "Create";
+                    actionButton.Enabled = _canCreateCharacter;
+                }
+                return;
+            }
+
+            actionButton.Text = "Choose";
+            actionButton.Enabled = _characters.Count > 0 && listView.SelectedItem >= 0;
+        }
+
+        listView.SelectedItemChanged += _ => UpdateActionState();
+        nameField.TextChanged += _ => UpdateActionState();
+        UpdateActionState();
+
+        actionButton.Clicked += () =>
+        {
+            var name = GetFieldText(nameField).Trim();
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                if (TryFindCharacter(name, out var match))
+                {
+                    _activeCharacterName = match!.Name;
+                    ApplyAppearanceForActiveProfile();
+                    _ = SendMessageAsync("character_select", new { characterId = match!.Id });
+                    AppendLogLine($"Character select: {match!.Name}");
+                    Application.RequestStop();
+                    return;
+                }
+
+                if (!_canCreateCharacter)
+                {
+                    MessageBox.ErrorQuery("Create", "Character creation is disabled.", "Ok");
+                    return;
+                }
+
+                _activeCharacterName = name;
+                ApplyAppearanceForActiveProfile();
+                _ = SendMessageAsync("character_create", new { name, appearance = new { description = "TBD" } });
+                AppendLogLine($"Character create: {name}");
+                Application.RequestStop();
+                return;
+            }
+
             if (_characters.Count == 0 || listView.SelectedItem < 0)
             {
-                MessageBox.ErrorQuery("Select", "Choose a character.", "Ok");
+                MessageBox.ErrorQuery("Select", "Choose a character or enter a name.", "Ok");
                 return;
             }
 
             var selected = _characters[Math.Min(listView.SelectedItem, _characters.Count - 1)];
+            _activeCharacterName = selected.Name;
+            ApplyAppearanceForActiveProfile();
             _ = SendMessageAsync("character_select", new { characterId = selected.Id });
             AppendLogLine($"Character select: {selected.Name}");
             Application.RequestStop();
         };
 
-        createButton.Clicked += () =>
-        {
-            var name = GetFieldText(nameField).Trim();
-            if (string.IsNullOrWhiteSpace(name))
-            {
-                MessageBox.ErrorQuery("Create", "Name required.", "Ok");
-                return;
-            }
-
-            _ = SendMessageAsync("character_create", new { name, appearance = new { description = "TBD" } });
-            AppendLogLine($"Character create: {name}");
-            Application.RequestStop();
-        };
-
-        cancelButton.Clicked += () => Application.RequestStop();
+        backButton.Clicked += () => Application.RequestStop();
 
         Application.Run(dialog);
+    }
+
+    private bool TryFindCharacter(string name, out CharacterSummary? match)
+    {
+        match = _characters.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+        return match != null;
     }
 
     private void ToggleTimestamps()
@@ -1326,6 +2104,8 @@ public sealed class MudClientApp : IDisposable
         _config.MaxUpdateRate = updated.MaxUpdateRate;
         _config.DefaultCommandType = updated.DefaultCommandType;
         _config.Theme = updated.Theme;
+        _config.NavRingStyle = updated.NavRingStyle;
+        _config.NavRingTheme = updated.NavRingTheme;
         _config.CustomTheme = updated.CustomTheme;
         _config.PositionCommandTemplate = updated.PositionCommandTemplate;
         _config.RangeBands = updated.RangeBands;
@@ -1335,8 +2115,9 @@ public sealed class MudClientApp : IDisposable
         _sendMode = SocketMessageModeParser.Parse(_config.SendMode, SocketMessageMode.Event);
         _receiveMode = SocketMessageModeParser.Parse(_config.ReceiveMode, SocketMessageMode.Event);
 
-        _ringView.RangeBands = _config.RangeBands;
-        BuildMacroButtons();
+        _ringView.RangeBands = NavigationSpeeds;
+        _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
+        _defaultAppearance = BuildAppearanceFromConfig(_config);
         ApplyTheme(_config.Theme, logChange: true);
         AppendLogLine("Config reloaded.");
     }
@@ -1544,6 +2325,7 @@ public sealed class MudClientApp : IDisposable
         }
 
         var scheme = _themeManager.Resolve(themeName, _config.CustomTheme, out var resolvedName);
+        var ringScheme = ResolveNavRingScheme(scheme, _config.NavRingTheme);
         _activeThemeName = resolvedName;
         _config.Theme = resolvedName;
 
@@ -1553,17 +2335,23 @@ public sealed class MudClientApp : IDisposable
         _window.ColorScheme = scheme;
         _logView.ColorScheme = scheme;
         _inputField.ColorScheme = scheme;
-        _macrosFrame.ColorScheme = scheme;
-        _ringView.ColorScheme = scheme;
+        _navigationFrame.ColorScheme = scheme;
+        _ringView.ColorScheme = ringScheme;
         _statusLabel.ColorScheme = scheme;
         _targetLabel.ColorScheme = scheme;
         _movementLabel.ColorScheme = scheme;
+        _navPositionLabel.ColorScheme = scheme;
+        _navHeadingLabel.ColorScheme = scheme;
         _ringInfoLabel.ColorScheme = scheme;
         _rosterFrame.ColorScheme = scheme;
         _entityListView.ColorScheme = scheme;
-        _approachButton.ColorScheme = scheme;
-        _evadeButton.ColorScheme = scheme;
+            _approachButton.ColorScheme = scheme;
+        _withdrawButton.ColorScheme = scheme;
         _entityActionLabel.ColorScheme = scheme;
+        _examineButton.ColorScheme = scheme;
+        _talkButton.ColorScheme = scheme;
+        _greetButton.ColorScheme = scheme;
+        _engageToggleButton.ColorScheme = scheme;
 
         Application.Top.SetNeedsDisplay();
         _window.SetNeedsDisplay();
@@ -1572,6 +2360,40 @@ public sealed class MudClientApp : IDisposable
         {
             AppendLogLine($"Theme set to {_activeThemeName}.");
         }
+    }
+
+    private static ColorScheme ResolveNavRingScheme(ColorScheme baseScheme, NavRingThemeConfig? navTheme)
+    {
+        if (navTheme == null ||
+            (string.IsNullOrWhiteSpace(navTheme.Foreground) && string.IsNullOrWhiteSpace(navTheme.Background)))
+        {
+            return baseScheme;
+        }
+
+        var fg = baseScheme.Normal.Foreground;
+        var bg = baseScheme.Normal.Background;
+
+        if (!string.IsNullOrWhiteSpace(navTheme.Foreground) &&
+            ColorParser.TryParse(navTheme.Foreground, out var parsedForeground))
+        {
+            fg = parsedForeground;
+        }
+
+        if (!string.IsNullOrWhiteSpace(navTheme.Background) &&
+            ColorParser.TryParse(navTheme.Background, out var parsedBackground))
+        {
+            bg = parsedBackground;
+        }
+
+        var normal = new Terminal.Gui.Attribute(fg, bg);
+        return new ColorScheme
+        {
+            Normal = normal,
+            Focus = normal,
+            HotNormal = normal,
+            HotFocus = normal,
+            Disabled = normal
+        };
     }
 
     private void UpdateAuthState(JsonElement payload)
@@ -1592,7 +2414,243 @@ public sealed class MudClientApp : IDisposable
             }
         }
 
+        if (TryAutoSelectCharacter())
+        {
+            _pendingCharacterDialog = false;
+            return;
+        }
+
         _pendingCharacterDialog = true;
+    }
+
+    private bool TryAutoSelectCharacter()
+    {
+        if (_activeConnection == null || string.IsNullOrWhiteSpace(_activeConnection.CharacterName))
+        {
+            return false;
+        }
+
+        var target = _activeConnection.CharacterName.Trim();
+        var match = _characters.FirstOrDefault(character =>
+            string.Equals(character.Name, target, StringComparison.OrdinalIgnoreCase));
+
+        if (match != null)
+        {
+            _activeCharacterName = match.Name;
+            ApplyAppearanceForActiveProfile();
+            _ = SendMessageAsync("character_select", new { characterId = match.Id });
+            AppendLogLine($"Character select: {match.Name}");
+            return true;
+        }
+
+        if (!_canCreateCharacter)
+        {
+            AppendLogLine($"Character \"{target}\" not found.");
+            return false;
+        }
+
+        _activeCharacterName = target;
+        ApplyAppearanceForActiveProfile();
+        _ = SendMessageAsync("character_create", new { name = target, appearance = new { description = "TBD" } });
+        AppendLogLine($"Character create: {target}");
+        return true;
+    }
+
+    private void ApplyCharacterFromWorldEntry(JsonElement payload)
+    {
+        if (payload.TryGetProperty("zone", out var zone) && zone.ValueKind == JsonValueKind.Object)
+        {
+            var zoneName = zone.GetPropertyOrDefault("name")?.GetString();
+            if (!string.IsNullOrWhiteSpace(zoneName))
+            {
+                _activeWorldName = zoneName;
+                RefreshSessionHeader();
+            }
+        }
+
+        if (!payload.TryGetProperty("character", out var character) ||
+            character.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        var name = character.GetPropertyOrDefault("name")?.GetString();
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return;
+        }
+
+        if (string.Equals(_activeCharacterName, name, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _activeCharacterName = name;
+        ApplyAppearanceForActiveProfile();
+        RefreshSessionHeader();
+    }
+
+    private AppearanceSettings BuildAppearanceFromConfig(MudClientConfig config)
+    {
+        return new AppearanceSettings
+        {
+            Theme = config.Theme,
+            CustomTheme = CloneThemeConfig(config.CustomTheme),
+            NavRingStyle = config.NavRingStyle,
+            NavRingTheme = CloneNavRingTheme(config.NavRingTheme)
+        };
+    }
+
+    private static ThemeConfig CloneThemeConfig(ThemeConfig? source)
+    {
+        if (source == null)
+        {
+            return new ThemeConfig();
+        }
+
+        return new ThemeConfig
+        {
+            NormalForeground = source.NormalForeground,
+            NormalBackground = source.NormalBackground,
+            AccentForeground = source.AccentForeground,
+            AccentBackground = source.AccentBackground,
+            MutedForeground = source.MutedForeground,
+            MutedBackground = source.MutedBackground
+        };
+    }
+
+    private static NavRingThemeConfig CloneNavRingTheme(NavRingThemeConfig? source)
+    {
+        if (source == null)
+        {
+            return new NavRingThemeConfig();
+        }
+
+        return new NavRingThemeConfig
+        {
+            Foreground = source.Foreground,
+            Background = source.Background
+        };
+    }
+
+    private AppearanceSettings CaptureCurrentAppearance()
+    {
+        return new AppearanceSettings
+        {
+            Theme = _config.Theme,
+            CustomTheme = CloneThemeConfig(_config.CustomTheme),
+            NavRingStyle = _config.NavRingStyle,
+            NavRingTheme = CloneNavRingTheme(_config.NavRingTheme)
+        };
+    }
+
+    private void ApplyAppearanceForActiveProfile()
+    {
+        var appearance = new AppearanceSettings
+        {
+            Theme = _defaultAppearance.Theme,
+            CustomTheme = CloneThemeConfig(_defaultAppearance.CustomTheme),
+            NavRingStyle = _defaultAppearance.NavRingStyle,
+            NavRingTheme = CloneNavRingTheme(_defaultAppearance.NavRingTheme)
+        };
+
+        if (_activeConnection != null)
+        {
+            ApplyAppearanceOverrides(appearance, _activeConnection.Settings);
+
+            if (!string.IsNullOrWhiteSpace(_activeCharacterName) &&
+                _activeConnection.CharacterSettings.TryGetValue(_activeCharacterName, out var characterSettings))
+            {
+                ApplyAppearanceOverrides(appearance, characterSettings);
+            }
+        }
+
+        ApplyAppearanceSettings(appearance);
+    }
+
+    private static void ApplyAppearanceOverrides(AppearanceSettings target, AppearanceSettings? overrides)
+    {
+        if (overrides == null)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(overrides.Theme))
+        {
+            target.Theme = overrides.Theme;
+        }
+
+        if (overrides.CustomTheme != null)
+        {
+            target.CustomTheme = CloneThemeConfig(overrides.CustomTheme);
+        }
+
+        if (!string.IsNullOrWhiteSpace(overrides.NavRingStyle))
+        {
+            target.NavRingStyle = overrides.NavRingStyle;
+        }
+
+        if (overrides.NavRingTheme != null)
+        {
+            target.NavRingTheme = CloneNavRingTheme(overrides.NavRingTheme);
+        }
+    }
+
+    private void ApplyAppearanceSettings(AppearanceSettings settings)
+    {
+        if (!string.IsNullOrWhiteSpace(settings.Theme))
+        {
+            _config.Theme = settings.Theme;
+        }
+
+        if (settings.CustomTheme != null)
+        {
+            _config.CustomTheme = CloneThemeConfig(settings.CustomTheme);
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.NavRingStyle))
+        {
+            _config.NavRingStyle = settings.NavRingStyle;
+        }
+
+        if (settings.NavRingTheme != null)
+        {
+            _config.NavRingTheme = CloneNavRingTheme(settings.NavRingTheme);
+        }
+
+        _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
+        ApplyTheme(_config.Theme, logChange: false);
+        SaveConfig();
+    }
+
+    private void SaveConfig()
+    {
+        _config.Save(_configPath);
+    }
+
+    private void SaveConnections()
+    {
+        _connectionStore.Save(_connectionsPath, _connections);
+    }
+
+    private void SaveAppearanceToActiveProfile()
+    {
+        if (_activeConnection == null)
+        {
+            return;
+        }
+
+        var appearance = CaptureCurrentAppearance();
+        if (!string.IsNullOrWhiteSpace(_activeCharacterName))
+        {
+            _activeConnection.CharacterSettings[_activeCharacterName] = appearance;
+        }
+        else
+        {
+            _activeConnection.Settings = appearance;
+        }
+
+        SaveConnections();
     }
 
     public void Dispose()
