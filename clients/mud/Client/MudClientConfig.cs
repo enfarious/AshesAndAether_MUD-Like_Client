@@ -28,20 +28,27 @@ public sealed class MudClientConfig
     };
     public List<MacroDefinition> Macros { get; set; } = new();
     public bool ShowDiagnosticInfo { get; set; } = false;
+    public KeybindSettings KeyBindings { get; set; } = KeybindSettings.CreateDefaults();
 
     public static MudClientConfig Load(string path)
     {
         if (!File.Exists(path))
         {
-            var config = new MudClientConfig();
-            var json = JsonSerializer.Serialize(config, JsonOptions);
+            var defaultConfig = new MudClientConfig();
+            var json = JsonSerializer.Serialize(defaultConfig, JsonOptions);
             Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
             File.WriteAllText(path, json);
-            return config;
+            return defaultConfig;
         }
 
         var contents = File.ReadAllText(path);
-        return JsonSerializer.Deserialize<MudClientConfig>(contents, JsonOptions) ?? new MudClientConfig();
+        var config = JsonSerializer.Deserialize<MudClientConfig>(contents, JsonOptions) ?? new MudClientConfig();
+        config.KeyBindings ??= KeybindSettings.CreateDefaults();
+        if (config.KeyBindings.Commands.Count == 0)
+        {
+            config.KeyBindings.Commands = KeybindSettings.CreateDefaults().Commands;
+        }
+        return config;
     }
 
     public void Save(string path)
@@ -73,4 +80,51 @@ public sealed class ThemeConfig
     public string? AccentBackground { get; set; }
     public string? MutedForeground { get; set; }
     public string? MutedBackground { get; set; }
+}
+
+public sealed class KeybindSettings
+{
+    public Dictionary<string, string> Bindings { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, string> Commands { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public static KeybindSettings CreateDefaults()
+    {
+        return new KeybindSettings
+        {
+            Bindings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["ability.1"] = "1",
+                ["ability.2"] = "2",
+                ["ability.3"] = "3",
+                ["ability.4"] = "4",
+                ["ability.5"] = "5",
+                ["ability.6"] = "6",
+                ["ability.7"] = "7",
+                ["ability.8"] = "8",
+                ["quick.1"] = "9",
+                ["quick.2"] = "0",
+                ["quick.3"] = "-",
+                ["quick.4"] = "=",
+                ["companion.prev"] = ",",
+                ["companion.next"] = "."
+            },
+            Commands = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["ability.1"] = "/cast ability1",
+                ["ability.2"] = "/cast ability2",
+                ["ability.3"] = "/cast ability3",
+                ["ability.4"] = "/cast ability4",
+                ["ability.5"] = "/cast ability5",
+                ["ability.6"] = "/cast ability6",
+                ["ability.7"] = "/cast ability7",
+                ["ability.8"] = "/cast ability8",
+                ["quick.1"] = "/use item1",
+                ["quick.2"] = "/use item2",
+                ["quick.3"] = "/use item3",
+                ["quick.4"] = "/use item4",
+                ["companion.prev"] = "/companion prev",
+                ["companion.next"] = "/companion next"
+            }
+        };
+    }
 }

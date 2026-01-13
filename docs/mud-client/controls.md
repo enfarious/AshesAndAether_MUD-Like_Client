@@ -14,6 +14,15 @@
 - `Enter`: Send command
 - `Up/Down`: Command history
 
+## Keybinds
+
+Keybinds are configurable in Settings. Defaults:
+- Ability slots: `1`-`8`
+- Quick items: `9`, `0`, `-`, `=`
+- Companion mode cycle: `,` and `.`
+
+Bindings send macro commands (e.g., `/cast ability1`, `/use item1`, `/companion next`). You can include `{target}` in commands.
+
 ## Position Ring
 
 - Mouse click: Select position intent (sends command)

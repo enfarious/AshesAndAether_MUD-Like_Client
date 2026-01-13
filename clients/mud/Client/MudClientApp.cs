@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Linq;
 using System;
 using System.Collections.Generic;
@@ -12,6 +13,25 @@ public sealed class MudClientApp : IDisposable
 {
     private const int MaxLogLines = 2000;
     private static readonly string[] NavigationSpeeds = { "run", "jog", "walk" };
+    private static readonly IReadOnlyList<KeybindAction> KeybindActions = new[]
+    {
+        new KeybindAction("ability.1", "Ability Slot 1", "1", "/cast ability1"),
+        new KeybindAction("ability.2", "Ability Slot 2", "2", "/cast ability2"),
+        new KeybindAction("ability.3", "Ability Slot 3", "3", "/cast ability3"),
+        new KeybindAction("ability.4", "Ability Slot 4", "4", "/cast ability4"),
+        new KeybindAction("ability.5", "Ability Slot 5", "5", "/cast ability5"),
+        new KeybindAction("ability.6", "Ability Slot 6", "6", "/cast ability6"),
+        new KeybindAction("ability.7", "Ability Slot 7", "7", "/cast ability7"),
+        new KeybindAction("ability.8", "Ability Slot 8", "8", "/cast ability8"),
+        new KeybindAction("quick.1", "Quick Item 1", "9", "/use item1"),
+        new KeybindAction("quick.2", "Quick Item 2", "0", "/use item2"),
+        new KeybindAction("quick.3", "Quick Item 3", "-", "/use item3"),
+        new KeybindAction("quick.4", "Quick Item 4", "=", "/use item4"),
+        new KeybindAction("companion.prev", "Companion Mode Prev", ",", "/companion prev"),
+        new KeybindAction("companion.next", "Companion Mode Next", ".", "/companion next")
+    };
+    private static readonly Dictionary<string, KeybindAction> KeybindActionLookup = KeybindActions
+        .ToDictionary(action => action.Id, action => action, StringComparer.OrdinalIgnoreCase);
 
     private readonly MudClientConfig _config;
     private readonly string _configPath;
@@ -28,13 +48,16 @@ public sealed class MudClientApp : IDisposable
     private readonly List<CharacterSummary> _characters = new();
     private bool _canCreateCharacter;
     private bool _pendingCharacterDialog;
+    private readonly Dictionary<string, string> _resolvedKeyBindings = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _keybindActionsByKey = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _resolvedKeyCommands = new(StringComparer.OrdinalIgnoreCase);
 
-    private readonly List<string> _logLines = new();
+    private readonly List<LogEntry> _logEntries = new();
     private readonly List<string> _history = new();
     private int _historyIndex = -1;
     private bool _showTimestamps = true;
 
-    private TextView _logView = null!;
+    private ListView _logView = null!;
     private TextField _inputField = null!;
     private Label _statusLabel = null!;
     private Label _targetLabel = null!;
@@ -67,6 +90,7 @@ public sealed class MudClientApp : IDisposable
     private string? _activeWorldName;
     private bool _isConnected;
     private AppearanceSettings _defaultAppearance;
+    private LogListSource _logSource = null!;
     private static readonly JsonSerializerOptions OutgoingLogOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -83,6 +107,7 @@ public sealed class MudClientApp : IDisposable
         _sendMode = SocketMessageModeParser.Parse(_config.SendMode, SocketMessageMode.Event);
         _receiveMode = SocketMessageModeParser.Parse(_config.ReceiveMode, SocketMessageMode.Event);
         _defaultAppearance = BuildAppearanceFromConfig(_config);
+        RefreshKeyBindings();
     }
 
     public void Run()
@@ -150,6 +175,7 @@ public sealed class MudClientApp : IDisposable
         ApplyTheme(_config.Theme, logChange: false);
 
         top.Add(_menuBar, _window, _statusBar);
+        Application.Top.KeyPress += OnGlobalKeyPress;
     }
 
     private void BuildMainLayout(Window window)
@@ -209,14 +235,13 @@ public sealed class MudClientApp : IDisposable
             Height = Dim.Fill(4)
         };
 
-        _logView = new TextView
+        _logSource = new LogListSource(_logEntries);
+        _logView = new ListView(_logSource)
         {
             X = 0,
             Y = 0,
             Width = Dim.Fill(),
-            Height = Dim.Fill(),
-            ReadOnly = true,
-            WordWrap = true
+            Height = Dim.Fill()
         };
         _logFrame.Add(_logView);
 
@@ -259,7 +284,7 @@ public sealed class MudClientApp : IDisposable
             X = 0,
             Y = 0,
             Width = Dim.Fill(),
-            Height = 11
+            Height = 15
         };
 
         _navPositionLabel = new Label("Loc: unknown")
@@ -625,6 +650,227 @@ public sealed class MudClientApp : IDisposable
         }
     }
 
+    private void OnGlobalKeyPress(View.KeyEventEventArgs args)
+    {
+        if (args.Handled || !IsFocusWithinMainWindow() || _inputField.HasFocus)
+        {
+            return;
+        }
+
+        if (TryHandleKeybind(args))
+        {
+            return;
+        }
+
+        if (!ShouldRouteToInput(args.KeyEvent.Key))
+        {
+            return;
+        }
+
+        _inputField.SetFocus();
+        if (_inputField.ProcessKey(args.KeyEvent))
+        {
+            args.Handled = true;
+        }
+    }
+
+    private bool TryHandleKeybind(View.KeyEventEventArgs args)
+    {
+        if (!TryNormalizeKeyEvent(args.KeyEvent, out var binding))
+        {
+            return false;
+        }
+
+        if (!_keybindActionsByKey.TryGetValue(binding, out var actionId))
+        {
+            return false;
+        }
+
+        ExecuteKeybindAction(actionId);
+        args.Handled = true;
+        return true;
+    }
+
+    private void ExecuteKeybindAction(string actionId)
+    {
+        if (!_resolvedKeyCommands.TryGetValue(actionId, out var command) ||
+            string.IsNullOrWhiteSpace(command) ||
+            string.Equals(command, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var context = new MacroContext
+        {
+            TargetToken = _state.CurrentTargetToken,
+            SelfToken = _activeCharacterName
+        };
+        var resolved = _macroEngine.Resolve(command, context).Trim();
+        if (string.IsNullOrWhiteSpace(resolved))
+        {
+            return;
+        }
+
+        if (resolved.StartsWith("/", StringComparison.Ordinal))
+        {
+            _ = SendSlashCommandAsync(resolved);
+        }
+        else
+        {
+            _ = SendTextCommandAsync(resolved);
+        }
+    }
+
+    private bool IsFocusWithinMainWindow()
+    {
+        var focused = Application.Top?.Focused;
+        while (focused != null)
+        {
+            if (focused == _window)
+            {
+                return true;
+            }
+            focused = focused.SuperView;
+        }
+
+        return false;
+    }
+
+    private static bool ShouldRouteToInput(Key key)
+    {
+        if ((key & (Key.AltMask | Key.CtrlMask)) != 0)
+        {
+            return false;
+        }
+
+        if (key == (Key)'/')
+        {
+            return true;
+        }
+
+        if (key is >= Key.A and <= Key.Z)
+        {
+            return true;
+        }
+
+        if (key == Key.Space)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+
+    private static string BuildBindingString(bool ctrl, bool shift, bool alt, string token)
+    {
+        var parts = new List<string>();
+        if (ctrl)
+        {
+            parts.Add("Ctrl");
+        }
+        if (shift)
+        {
+            parts.Add("Shift");
+        }
+        if (alt)
+        {
+            parts.Add("Alt");
+        }
+
+        parts.Add(token);
+        return string.Join("+", parts);
+    }
+
+    private static bool TryNormalizeKeyEvent(KeyEvent keyEvent, out string binding)
+    {
+        binding = string.Empty;
+        var key = keyEvent.Key;
+        if (key == Key.Esc)
+        {
+            return false;
+        }
+
+        var shift = (key & Key.ShiftMask) != 0;
+        var ctrl = (key & Key.CtrlMask) != 0;
+        var alt = (key & Key.AltMask) != 0;
+
+        if (!TryGetKeyToken(key, shift, out var token))
+        {
+            return false;
+        }
+
+        binding = BuildBindingString(ctrl, shift, alt, token);
+        return true;
+    }
+
+    private static bool TryGetKeyToken(Key key, bool shift, out string token)
+    {
+        token = string.Empty;
+        var raw = key & Key.CharMask;
+        if (raw == 0)
+        {
+            return false;
+        }
+
+        var ch = (char)raw;
+        if (char.IsControl(ch))
+        {
+            return false;
+        }
+
+        if (shift && ShiftedKeyMap.TryGetValue(ch, out var unshifted))
+        {
+            ch = unshifted;
+        }
+
+        if (char.IsLetter(ch))
+        {
+            token = char.ToUpperInvariant(ch).ToString();
+            return true;
+        }
+
+        token = ch switch
+        {
+            ',' => ",",
+            '.' => ".",
+            '-' => "-",
+            '=' => "=",
+            '/' => "/",
+            '0' => "0",
+            '1' => "1",
+            '2' => "2",
+            '3' => "3",
+            '4' => "4",
+            '5' => "5",
+            '6' => "6",
+            '7' => "7",
+            '8' => "8",
+            '9' => "9",
+            _ => string.Empty
+        };
+
+        return !string.IsNullOrWhiteSpace(token);
+    }
+
+    private static readonly Dictionary<char, char> ShiftedKeyMap = new()
+    {
+        ['!'] = '1',
+        ['@'] = '2',
+        ['#'] = '3',
+        ['$'] = '4',
+        ['%'] = '5',
+        ['^'] = '6',
+        ['&'] = '7',
+        ['*'] = '8',
+        ['('] = '9',
+        [')'] = '0',
+        ['_'] = '-',
+        ['+'] = '=',
+        ['<'] = ',',
+        ['>'] = '.'
+    };
+
     private void CycleHistory(int direction)
     {
         if (_history.Count == 0)
@@ -664,6 +910,11 @@ public sealed class MudClientApp : IDisposable
             return;
         }
 
+        if (TryHandleLocalSlashCommand(text))
+        {
+            return;
+        }
+
         if (_sendMode == SocketMessageMode.Event)
         {
             LogOutgoing("command", text);
@@ -675,6 +926,50 @@ public sealed class MudClientApp : IDisposable
             await SendMessageAsync("command", payload);
         }
         AppendLogLine($"> {text}");
+    }
+
+    private bool TryHandleLocalSlashCommand(string text)
+    {
+        var trimmed = text.Trim();
+        if (!trimmed.StartsWith("/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var commandLine = trimmed[1..];
+        if (string.IsNullOrWhiteSpace(commandLine))
+        {
+            return false;
+        }
+
+        var parts = commandLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0)
+        {
+            return false;
+        }
+
+        if (string.Equals(parts[0], "client", StringComparison.OrdinalIgnoreCase))
+        {
+            if (parts.Length == 1)
+            {
+                AppendLogLine("Client commands: roster");
+            }
+            else
+            {
+                HandleClientCommand(string.Join(' ', parts.Skip(1)));
+            }
+            AppendLogLine($"> {text}");
+            return true;
+        }
+
+        if (string.Equals(parts[0], "roster", StringComparison.OrdinalIgnoreCase))
+        {
+            HandleClientCommand(commandLine);
+            AppendLogLine($"> {text}");
+            return true;
+        }
+
+        return false;
     }
 
     private void SendMacro(string commandTemplate)
@@ -799,6 +1094,9 @@ public sealed class MudClientApp : IDisposable
 
     private void RefreshEntityRoster()
     {
+        var selectedKey = GetSelectedNearbyEntity() is NearbyEntityInfo selected
+            ? BuildEngagementKey(selected)
+            : null;
         var entries = BuildNearbyEntities();
 
         _entityRosterSnapshot.Clear();
@@ -812,9 +1110,18 @@ public sealed class MudClientApp : IDisposable
 
         _entityListView.SetSource(lines);
         var sourceCount = _entityListView.Source.Count;
-        if (sourceCount > 0)
+        if (entries.Count > 0)
         {
-            _entityListView.SelectedItem = Math.Clamp(_entityListView.SelectedItem, 0, sourceCount - 1);
+            var selectedIndex = -1;
+            if (!string.IsNullOrWhiteSpace(selectedKey))
+            {
+                selectedIndex = entries.FindIndex(entity =>
+                    string.Equals(BuildEngagementKey(entity), selectedKey, StringComparison.OrdinalIgnoreCase));
+            }
+
+            _entityListView.SelectedItem = selectedIndex >= 0
+                ? selectedIndex
+                : Math.Clamp(_entityListView.SelectedItem, 0, sourceCount - 1);
         }
         else
         {
@@ -953,6 +1260,7 @@ public sealed class MudClientApp : IDisposable
         }
 
         UpdateEngageButtonLabel(entity.Value);
+        RefreshEntityRoster();
     }
 
     private void UpdateEngageButtonLabel(NearbyEntityInfo entity)
@@ -1061,7 +1369,8 @@ public sealed class MudClientApp : IDisposable
         }
 
         return DeduplicateNearbyEntities(raw)
-            .OrderBy(entity => entity.Range ?? double.MaxValue)
+            .OrderByDescending(entity => _engagedEntities.Contains(BuildEngagementKey(entity)))
+            .ThenBy(entity => entity.Range ?? double.MaxValue)
             .ThenBy(entity => entity.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
@@ -1127,20 +1436,37 @@ public sealed class MudClientApp : IDisposable
             ? $"[{DateTime.Now:HH:mm:ss}] {line}"
             : line;
 
-        _logLines.Add(formatted);
-        if (_logLines.Count > MaxLogLines)
+        var kind = LogListSource.Classify(line);
+        _logEntries.Add(new LogEntry(formatted, kind));
+        if (_logEntries.Count > MaxLogLines)
         {
-            _logLines.RemoveRange(0, _logLines.Count - MaxLogLines);
+            _logEntries.RemoveRange(0, _logEntries.Count - MaxLogLines);
         }
 
-        _logView.Text = string.Join('\n', _logLines);
-        _logView.MoveEnd();
+        _logView.SetNeedsDisplay();
+        ScrollLogToEnd();
+    }
+
+    private void ScrollLogToEnd()
+    {
+        var count = _logSource?.Count ?? 0;
+        if (count <= 0)
+        {
+            return;
+        }
+
+        var lastIndex = count - 1;
+        _logView.SelectedItem = lastIndex;
+
+        var visibleRows = Math.Max(1, _logView.Bounds.Height);
+        _logView.TopItem = Math.Max(0, lastIndex - visibleRows + 1);
     }
 
     private void ShowHelp()
     {
         AppendLogLine("Slash commands are forwarded to the server.");
         AppendLogLine("Use the menu or function keys for connect/login/theme/reload/quit actions.");
+        AppendLogLine("Client-only: /client roster (or /roster) dumps the proximity roster cache.");
         AppendLogLine("Use macros for quick actions. Use the ring to send position intents relative to the current target.");
     }
 
@@ -1690,7 +2016,7 @@ public sealed class MudClientApp : IDisposable
         var saveButton = new Button("Save");
         var cancelButton = new Button("Cancel");
         saveButton.IsDefault = true;
-        var dialog = new Dialog("Settings", 70, 22, saveButton, cancelButton);
+        var dialog = new Dialog("Settings", 90, 24, saveButton, cancelButton);
 
         var themeLabel = new Label("Theme:")
         {
@@ -1737,13 +2063,226 @@ public sealed class MudClientApp : IDisposable
             Width = 20
         };
 
-        dialog.Add(themeLabel, themeList, navStyleLabel, navStyleGroup, navFgLabel, navFgField, navBgLabel, navBgField);
+        var keybindFrame = new FrameView("Keybinds")
+        {
+            X = 35,
+            Y = 1,
+            Width = Dim.Fill(2),
+            Height = Dim.Fill(2)
+        };
+
+        var scopeLabel = new Label("Scope:")
+        {
+            X = 1,
+            Y = 0
+        };
+        var scopeGroup = new RadioGroup(9, 0, new[] { (ustring)"Global", "Connection", "Character" }, 0);
+        var scopeNote = new Label("Blank inherits. Use 'none' to disable.")
+        {
+            X = 1,
+            Y = 1
+        };
+
+        var actionList = new ListView(KeybindActions.Select(action => action.Label).ToList())
+        {
+            X = 1,
+            Y = 3,
+            Width = 20,
+            Height = 9
+        };
+
+        var bindingLabel = new Label("Binding:")
+        {
+            X = 23,
+            Y = 3
+        };
+        var bindingField = new TextField(string.Empty)
+        {
+            X = 32,
+            Y = 3,
+            Width = 12
+        };
+        var bindButton = new Button("Bind")
+        {
+            X = 45,
+            Y = 3
+        };
+        var bindHint = new Label(string.Empty)
+        {
+            X = 23,
+            Y = 4,
+            Width = Dim.Fill(2)
+        };
+
+        var commandLabel = new Label("Command:")
+        {
+            X = 23,
+            Y = 6
+        };
+        var commandField = new TextField(string.Empty)
+        {
+            X = 32,
+            Y = 6,
+            Width = 32
+        };
+
+        keybindFrame.Add(scopeLabel, scopeGroup, scopeNote, actionList, bindingLabel, bindingField, bindButton, bindHint, commandLabel, commandField);
+
+        dialog.Add(themeLabel, themeList, navStyleLabel, navStyleGroup, navFgLabel, navFgField, navBgLabel, navBgField, keybindFrame);
 
         var selectedThemeIndex = themes.FindIndex(name => string.Equals(name, _config.Theme, StringComparison.OrdinalIgnoreCase));
         themeList.SelectedItem = selectedThemeIndex < 0 ? 0 : selectedThemeIndex;
 
+        KeybindScope GetSelectedScope() => scopeGroup.SelectedItem switch
+        {
+            1 => KeybindScope.Connection,
+            2 => KeybindScope.Character,
+            _ => KeybindScope.Global
+        };
+
+        var globalBindings = new Dictionary<string, string>(_config.KeyBindings.Bindings, StringComparer.OrdinalIgnoreCase);
+        var globalCommands = new Dictionary<string, string>(_config.KeyBindings.Commands, StringComparer.OrdinalIgnoreCase);
+        var connectionBindings = _activeConnection?.Settings.KeyBindings?.Bindings == null
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(_activeConnection.Settings.KeyBindings.Bindings, StringComparer.OrdinalIgnoreCase);
+        var connectionCommands = _activeConnection?.Settings.KeyBindings?.Commands == null
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(_activeConnection.Settings.KeyBindings.Commands, StringComparer.OrdinalIgnoreCase);
+        var characterBindings = GetCharacterKeybindOverrides() ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var characterCommands = GetCharacterKeybindCommandOverrides() ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        Dictionary<string, string> GetWorkingBindings(KeybindScope scope) => scope switch
+        {
+            KeybindScope.Connection => connectionBindings,
+            KeybindScope.Character => characterBindings,
+            _ => globalBindings
+        };
+
+        Dictionary<string, string> GetWorkingCommands(KeybindScope scope) => scope switch
+        {
+            KeybindScope.Connection => connectionCommands,
+            KeybindScope.Character => characterCommands,
+            _ => globalCommands
+        };
+
+        string? currentActionId = null;
+        bool isCapturing = false;
+
+        void CommitCurrentActionFields()
+        {
+            if (string.IsNullOrWhiteSpace(currentActionId))
+            {
+                return;
+            }
+
+            var scope = GetSelectedScope();
+            var bindings = GetWorkingBindings(scope);
+            var commands = GetWorkingCommands(scope);
+
+            var bindingText = GetFieldText(bindingField).Trim();
+            if (string.IsNullOrWhiteSpace(bindingText))
+            {
+                bindings.Remove(currentActionId);
+            }
+            else
+            {
+                bindings[currentActionId] = bindingText;
+            }
+
+            var commandText = GetFieldText(commandField).Trim();
+            if (string.IsNullOrWhiteSpace(commandText))
+            {
+                commands.Remove(currentActionId);
+            }
+            else
+            {
+                commands[currentActionId] = commandText;
+            }
+        }
+
+        void LoadActionFields(string actionId)
+        {
+            var scope = GetSelectedScope();
+            var bindings = GetWorkingBindings(scope);
+            var commands = GetWorkingCommands(scope);
+
+            bindingField.Text = bindings.TryGetValue(actionId, out var binding) ? binding : string.Empty;
+            commandField.Text = commands.TryGetValue(actionId, out var command) ? command : string.Empty;
+            currentActionId = actionId;
+        }
+
+        void RefreshActionSelection()
+        {
+            if (actionList.Source.Count == 0)
+            {
+                return;
+            }
+
+            if (actionList.SelectedItem < 0)
+            {
+                actionList.SelectedItem = 0;
+            }
+
+            var action = KeybindActions.ElementAtOrDefault(actionList.SelectedItem);
+            if (action != null)
+            {
+                LoadActionFields(action.Id);
+            }
+        }
+
+        scopeGroup.SelectedItemChanged += _ =>
+        {
+            CommitCurrentActionFields();
+            LoadActionFields(currentActionId ?? KeybindActions.First().Id);
+        };
+
+        actionList.SelectedItemChanged += _ =>
+        {
+            CommitCurrentActionFields();
+            var action = KeybindActions.ElementAtOrDefault(actionList.SelectedItem);
+            if (action != null)
+            {
+                LoadActionFields(action.Id);
+            }
+        };
+
+        bindButton.Clicked += () =>
+        {
+            isCapturing = true;
+            bindHint.Text = "Press a key (Esc to cancel).";
+            dialog.SetNeedsDisplay();
+        };
+
+        dialog.KeyPress += args =>
+        {
+            if (!isCapturing)
+            {
+                return;
+            }
+
+            if (args.KeyEvent.Key == Key.Esc)
+            {
+                isCapturing = false;
+                bindHint.Text = string.Empty;
+                args.Handled = true;
+                return;
+            }
+
+            if (TryNormalizeKeyEvent(args.KeyEvent, out var binding))
+            {
+                bindingField.Text = binding;
+                isCapturing = false;
+                bindHint.Text = string.Empty;
+                args.Handled = true;
+            }
+        };
+
+        RefreshActionSelection();
+
         saveButton.Clicked += () =>
         {
+            CommitCurrentActionFields();
+
             var theme = themes.ElementAtOrDefault(themeList.SelectedItem) ?? _config.Theme;
             _config.Theme = theme;
             _config.NavRingStyle = navStyleGroup.SelectedItem == 1 ? "grid" : "ring";
@@ -1751,8 +2290,16 @@ public sealed class MudClientApp : IDisposable
             _config.NavRingTheme.Background = GetFieldText(navBgField).Trim();
             _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
             ApplyTheme(_config.Theme, logChange: true);
+
+            var scope = GetSelectedScope();
+            if (!TrySaveKeybindScope(scope, GetWorkingBindings(scope), GetWorkingCommands(scope)))
+            {
+                return;
+            }
+
             SaveAppearanceToActiveProfile();
             SaveConfig();
+            RefreshKeyBindings();
             Application.RequestStop();
         };
 
@@ -2090,6 +2637,13 @@ public sealed class MudClientApp : IDisposable
         double? Bearing,
         double? Elevation,
         double? Range);
+    private sealed record KeybindAction(string Id, string Label, string DefaultBinding, string DefaultCommand);
+    private enum KeybindScope
+    {
+        Global,
+        Connection,
+        Character
+    }
 
     private void ReloadConfig()
     {
@@ -2111,6 +2665,7 @@ public sealed class MudClientApp : IDisposable
         _config.RangeBands = updated.RangeBands;
         _config.Macros = updated.Macros;
         _config.ShowDiagnosticInfo = updated.ShowDiagnosticInfo;
+        _config.KeyBindings = updated.KeyBindings ?? KeybindSettings.CreateDefaults();
 
         _sendMode = SocketMessageModeParser.Parse(_config.SendMode, SocketMessageMode.Event);
         _receiveMode = SocketMessageModeParser.Parse(_config.ReceiveMode, SocketMessageMode.Event);
@@ -2119,6 +2674,7 @@ public sealed class MudClientApp : IDisposable
         _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
         _defaultAppearance = BuildAppearanceFromConfig(_config);
         ApplyTheme(_config.Theme, logChange: true);
+        RefreshKeyBindings();
         AppendLogLine("Config reloaded.");
     }
 
@@ -2191,6 +2747,9 @@ public sealed class MudClientApp : IDisposable
             case "ping":
                 _ = SendMessageAsync("ping", new { timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
                 break;
+            case "roster":
+                DumpProximityRoster();
+                break;
             case "raw":
                 if (parts.Length < 2)
                 {
@@ -2212,6 +2771,38 @@ public sealed class MudClientApp : IDisposable
             default:
                 AppendLogLine($"Unknown command: {command}");
                 break;
+        }
+    }
+
+    private void DumpProximityRoster()
+    {
+        var roster = _state.ProximityRoster;
+        var danger = roster.DangerState.HasValue ? (roster.DangerState.Value ? "true" : "false") : "unknown";
+        AppendLogLine($"Roster cache: danger={danger}");
+
+        var channels = roster.GetChannelSnapshots();
+        if (channels.Count == 0)
+        {
+            AppendLogLine("Roster cache is empty.");
+            return;
+        }
+
+        foreach (var channel in channels)
+        {
+            var sampleText = channel.Sample == null
+                ? "none"
+                : channel.Sample.Count == 0 ? "[]" : string.Join(", ", channel.Sample);
+            var lastSpeakerText = string.IsNullOrWhiteSpace(channel.LastSpeaker) ? "none" : channel.LastSpeaker;
+            AppendLogLine($"Channel {channel.Name}: count={channel.Count} entities={channel.Entities.Count} sample={sampleText} lastSpeaker={lastSpeakerText}");
+
+            foreach (var entity in channel.Entities)
+            {
+                var name = string.IsNullOrWhiteSpace(entity.Name) ? entity.Id : entity.Name;
+                var bearing = entity.Bearing.ToString("0.##", CultureInfo.InvariantCulture);
+                var elevation = entity.Elevation.ToString("0.##", CultureInfo.InvariantCulture);
+                var range = entity.Range.ToString("0.##", CultureInfo.InvariantCulture);
+                AppendLogLine($"- {name} ({entity.Type}) id={entity.Id} brg={bearing} elev={elevation} rng={range}");
+            }
         }
     }
 
@@ -2334,6 +2925,7 @@ public sealed class MudClientApp : IDisposable
         _statusBar.ColorScheme = scheme;
         _window.ColorScheme = scheme;
         _logView.ColorScheme = scheme;
+        _logSource.UpdatePalette(scheme);
         _inputField.ColorScheme = scheme;
         _navigationFrame.ColorScheme = scheme;
         _ringView.ColorScheme = ringScheme;
@@ -2566,6 +3158,7 @@ public sealed class MudClientApp : IDisposable
         }
 
         ApplyAppearanceSettings(appearance);
+        RefreshKeyBindings();
     }
 
     private static void ApplyAppearanceOverrides(AppearanceSettings target, AppearanceSettings? overrides)
@@ -2621,6 +3214,7 @@ public sealed class MudClientApp : IDisposable
         _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
         ApplyTheme(_config.Theme, logChange: false);
         SaveConfig();
+        RefreshKeyBindings();
     }
 
     private void SaveConfig()
@@ -2643,14 +3237,315 @@ public sealed class MudClientApp : IDisposable
         var appearance = CaptureCurrentAppearance();
         if (!string.IsNullOrWhiteSpace(_activeCharacterName))
         {
+            if (_activeConnection.CharacterSettings.TryGetValue(_activeCharacterName, out var existing) &&
+                existing.KeyBindings != null)
+            {
+                appearance.KeyBindings = CloneKeybindSettings(existing.KeyBindings);
+            }
             _activeConnection.CharacterSettings[_activeCharacterName] = appearance;
         }
         else
         {
+            if (_activeConnection.Settings.KeyBindings != null)
+            {
+                appearance.KeyBindings = CloneKeybindSettings(_activeConnection.Settings.KeyBindings);
+            }
             _activeConnection.Settings = appearance;
         }
 
         SaveConnections();
+    }
+
+    private void RefreshKeyBindings()
+    {
+        _resolvedKeyBindings.Clear();
+        _keybindActionsByKey.Clear();
+        _resolvedKeyCommands.Clear();
+
+        foreach (var action in KeybindActions)
+        {
+            var binding = ResolveBindingForAction(action);
+            if (string.IsNullOrWhiteSpace(binding))
+            {
+                continue;
+            }
+
+            var normalized = NormalizeBindingString(binding);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                continue;
+            }
+
+            _resolvedKeyBindings[action.Id] = normalized;
+            if (!_keybindActionsByKey.ContainsKey(normalized))
+            {
+                _keybindActionsByKey[normalized] = action.Id;
+            }
+
+            var command = ResolveCommandForAction(action);
+            if (!string.IsNullOrWhiteSpace(command))
+            {
+                _resolvedKeyCommands[action.Id] = command;
+            }
+        }
+    }
+
+    private string ResolveBindingForAction(KeybindAction action)
+    {
+        var binding = GetBindingFromScope(_config.KeyBindings, action.Id);
+        if (binding == null)
+        {
+            binding = action.DefaultBinding;
+        }
+
+        var connectionOverride = _activeConnection?.Settings.KeyBindings;
+        if (connectionOverride != null)
+        {
+            binding = GetBindingFromScope(connectionOverride, action.Id) ?? binding;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_activeCharacterName) &&
+            _activeConnection != null &&
+            _activeConnection.CharacterSettings.TryGetValue(_activeCharacterName, out var characterSettings) &&
+            characterSettings.KeyBindings != null)
+        {
+            binding = GetBindingFromScope(characterSettings.KeyBindings, action.Id) ?? binding;
+        }
+
+        return binding ?? string.Empty;
+    }
+
+    private string ResolveCommandForAction(KeybindAction action)
+    {
+        var command = GetCommandFromScope(_config.KeyBindings, action.Id);
+        if (command == null)
+        {
+            command = action.DefaultCommand;
+        }
+
+        var connectionOverride = _activeConnection?.Settings.KeyBindings;
+        if (connectionOverride != null)
+        {
+            command = GetCommandFromScope(connectionOverride, action.Id) ?? command;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_activeCharacterName) &&
+            _activeConnection != null &&
+            _activeConnection.CharacterSettings.TryGetValue(_activeCharacterName, out var characterSettings) &&
+            characterSettings.KeyBindings != null)
+        {
+            command = GetCommandFromScope(characterSettings.KeyBindings, action.Id) ?? command;
+        }
+
+        return command ?? string.Empty;
+    }
+
+    private static string? GetBindingFromScope(KeybindSettings scope, string actionId)
+    {
+        if (!scope.Bindings.TryGetValue(actionId, out var binding))
+        {
+            return null;
+        }
+
+        return string.Equals(binding, "none", StringComparison.OrdinalIgnoreCase) ? string.Empty : binding;
+    }
+
+    private static string? GetCommandFromScope(KeybindSettings scope, string actionId)
+    {
+        if (!scope.Commands.TryGetValue(actionId, out var command))
+        {
+            return null;
+        }
+
+        return string.Equals(command, "none", StringComparison.OrdinalIgnoreCase) ? string.Empty : command;
+    }
+
+    private Dictionary<string, string>? GetCharacterKeybindOverrides()
+    {
+        if (_activeConnection == null || string.IsNullOrWhiteSpace(_activeCharacterName))
+        {
+            return null;
+        }
+
+        if (!_activeConnection.CharacterSettings.TryGetValue(_activeCharacterName, out var settings) ||
+            settings.KeyBindings?.Bindings == null)
+        {
+            return null;
+        }
+
+        return new Dictionary<string, string>(settings.KeyBindings.Bindings, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private Dictionary<string, string>? GetCharacterKeybindCommandOverrides()
+    {
+        if (_activeConnection == null || string.IsNullOrWhiteSpace(_activeCharacterName))
+        {
+            return null;
+        }
+
+        if (!_activeConnection.CharacterSettings.TryGetValue(_activeCharacterName, out var settings) ||
+            settings.KeyBindings?.Commands == null)
+        {
+            return null;
+        }
+
+        return new Dictionary<string, string>(settings.KeyBindings.Commands, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private bool TrySaveKeybindScope(
+        KeybindScope scope,
+        Dictionary<string, string> bindings,
+        Dictionary<string, string> commands)
+    {
+        if (scope == KeybindScope.Connection && _activeConnection == null)
+        {
+            MessageBox.ErrorQuery("Settings", "No active connection for connection-scoped keybinds.", "Ok");
+            return false;
+        }
+
+        if (scope == KeybindScope.Character &&
+            (_activeConnection == null || string.IsNullOrWhiteSpace(_activeCharacterName)))
+        {
+            MessageBox.ErrorQuery("Settings", "No active character for character-scoped keybinds.", "Ok");
+            return false;
+        }
+
+        var normalizedBindings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var normalizedCommands = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var bindingUsage = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var action in KeybindActions)
+        {
+            if (bindings.TryGetValue(action.Id, out var rawBinding))
+            {
+                if (!string.IsNullOrWhiteSpace(rawBinding))
+                {
+                    var normalized = NormalizeBindingString(rawBinding);
+                    if (string.IsNullOrWhiteSpace(normalized))
+                    {
+                        MessageBox.ErrorQuery("Settings", $"Invalid binding for {action.Label}.", "Ok");
+                        return false;
+                    }
+
+                    if (string.Equals(normalized, "none", StringComparison.OrdinalIgnoreCase))
+                    {
+                        normalizedBindings[action.Id] = "none";
+                        continue;
+                    }
+
+                    if (bindingUsage.TryGetValue(normalized, out var conflict))
+                    {
+                        MessageBox.ErrorQuery("Settings", $"Binding {normalized} already used by {conflict}.", "Ok");
+                        return false;
+                    }
+
+                    bindingUsage[normalized] = action.Label;
+                    normalizedBindings[action.Id] = normalized;
+                }
+            }
+
+            if (commands.TryGetValue(action.Id, out var rawCommand))
+            {
+                if (!string.IsNullOrWhiteSpace(rawCommand))
+                {
+                    normalizedCommands[action.Id] = rawCommand.Trim();
+                }
+            }
+        }
+
+        switch (scope)
+        {
+            case KeybindScope.Global:
+                _config.KeyBindings.Bindings = normalizedBindings;
+                _config.KeyBindings.Commands = normalizedCommands;
+                break;
+            case KeybindScope.Connection:
+                _activeConnection!.Settings.KeyBindings = normalizedBindings.Count == 0 && normalizedCommands.Count == 0
+                    ? null
+                    : new KeybindSettings
+                    {
+                        Bindings = normalizedBindings,
+                        Commands = normalizedCommands
+                    };
+                SaveConnections();
+                break;
+            case KeybindScope.Character:
+                var settings = _activeConnection!.CharacterSettings.TryGetValue(_activeCharacterName!, out var existing)
+                    ? existing
+                    : new AppearanceSettings();
+                settings.KeyBindings = normalizedBindings.Count == 0 && normalizedCommands.Count == 0
+                    ? null
+                    : new KeybindSettings
+                    {
+                        Bindings = normalizedBindings,
+                        Commands = normalizedCommands
+                    };
+                _activeConnection.CharacterSettings[_activeCharacterName!] = settings;
+                SaveConnections();
+                break;
+        }
+
+        return true;
+    }
+
+    private static string NormalizeBindingString(string binding)
+    {
+        if (string.IsNullOrWhiteSpace(binding))
+        {
+            return string.Empty;
+        }
+
+        if (string.Equals(binding, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return "none";
+        }
+
+        var parts = binding.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var ctrl = parts.Any(p => string.Equals(p, "ctrl", StringComparison.OrdinalIgnoreCase) || string.Equals(p, "control", StringComparison.OrdinalIgnoreCase));
+        var shift = parts.Any(p => string.Equals(p, "shift", StringComparison.OrdinalIgnoreCase));
+        var alt = parts.Any(p => string.Equals(p, "alt", StringComparison.OrdinalIgnoreCase) || string.Equals(p, "option", StringComparison.OrdinalIgnoreCase));
+
+        var keyToken = parts.LastOrDefault(p =>
+            !string.Equals(p, "ctrl", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(p, "control", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(p, "shift", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(p, "alt", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(p, "option", StringComparison.OrdinalIgnoreCase));
+
+        if (string.IsNullOrWhiteSpace(keyToken))
+        {
+            return string.Empty;
+        }
+
+        keyToken = NormalizeKeyToken(keyToken);
+        return BuildBindingString(ctrl, shift, alt, keyToken);
+    }
+
+    private static string NormalizeKeyToken(string token)
+    {
+        if (token.Length == 1)
+        {
+            var ch = token[0];
+            return char.IsLetter(ch) ? char.ToUpperInvariant(ch).ToString() : token;
+        }
+
+        return token.ToLowerInvariant() switch
+        {
+            "comma" => ",",
+            "period" => ".",
+            "minus" => "-",
+            "equals" => "=",
+            "slash" => "/",
+            _ => token.ToUpperInvariant()
+        };
+    }
+
+    private static KeybindSettings CloneKeybindSettings(KeybindSettings source)
+    {
+        return new KeybindSettings
+        {
+            Bindings = new Dictionary<string, string>(source.Bindings, StringComparer.OrdinalIgnoreCase),
+            Commands = new Dictionary<string, string>(source.Commands, StringComparer.OrdinalIgnoreCase)
+        };
     }
 
     public void Dispose()

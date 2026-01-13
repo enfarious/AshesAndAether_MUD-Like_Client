@@ -226,7 +226,7 @@ public sealed class ProximityRosterCache
             channel.Count = delta.Count.Value;
         }
 
-        if (delta.Sample != null)
+        if (delta.SampleChanged)
         {
             channel.Sample = delta.Sample;
         }
@@ -234,6 +234,43 @@ public sealed class ProximityRosterCache
         if (delta.LastSpeakerChanged)
         {
             channel.LastSpeaker = delta.LastSpeaker;
+        }
+    }
+
+    public void ReplaceChannel(
+        string channelName,
+        IReadOnlyList<ProximityEntity> entities,
+        int? count,
+        List<string>? sample,
+        bool sampleProvided,
+        string? lastSpeaker,
+        bool lastSpeakerProvided)
+    {
+        var channel = GetOrCreateChannel(channelName);
+        channel.Entities.Clear();
+        foreach (var entity in entities)
+        {
+            channel.Entities[entity.Id] = entity;
+        }
+
+        channel.Count = count ?? entities.Count;
+
+        if (sampleProvided)
+        {
+            channel.Sample = sample;
+        }
+        else
+        {
+            channel.Sample = null;
+        }
+
+        if (lastSpeakerProvided)
+        {
+            channel.LastSpeaker = lastSpeaker;
+        }
+        else
+        {
+            channel.LastSpeaker = null;
         }
     }
 
@@ -275,6 +312,31 @@ public sealed class ProximityRosterCache
         return _channels.Values.Any(c => c.Entities.Count > 0);
     }
 
+    public IReadOnlyList<ProximityChannelSnapshot> GetChannelSnapshots()
+    {
+        return _channels.Values
+            .OrderBy(channel => channel.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(channel => new ProximityChannelSnapshot(
+                channel.Name,
+                channel.Count,
+                channel.Sample == null ? null : new List<string>(channel.Sample),
+                channel.LastSpeaker,
+                channel.Entities.Values
+                    .OrderBy(entity => entity.Range)
+                    .ThenBy(entity => entity.Name, StringComparer.OrdinalIgnoreCase)
+                    .Select(entity => new ProximityEntity
+                    {
+                        Id = entity.Id,
+                        Name = entity.Name,
+                        Type = entity.Type,
+                        Bearing = entity.Bearing,
+                        Elevation = entity.Elevation,
+                        Range = entity.Range
+                    })
+                    .ToList()))
+            .ToList();
+    }
+
     private ProximityChannelCache GetOrCreateChannel(string name)
     {
         if (!_channels.TryGetValue(name, out var channel))
@@ -301,6 +363,13 @@ public sealed class ProximityChannelCache
     }
 }
 
+public sealed record ProximityChannelSnapshot(
+    string Name,
+    int Count,
+    List<string>? Sample,
+    string? LastSpeaker,
+    IReadOnlyList<ProximityEntity> Entities);
+
 public sealed class ProximityEntity
 {
     public string Id { get; set; } = string.Empty;
@@ -318,6 +387,7 @@ public sealed class ProximityChannelDelta
     public List<ProximityEntityDelta> Updated { get; } = new();
     public int? Count { get; set; }
     public List<string>? Sample { get; set; }
+    public bool SampleChanged { get; set; }
     public string? LastSpeaker { get; set; }
     public bool LastSpeakerChanged { get; set; }
 }

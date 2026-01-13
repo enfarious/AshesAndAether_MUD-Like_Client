@@ -486,7 +486,12 @@ public sealed class MessageRouter
 
         foreach (var channel in channels.EnumerateObject())
         {
-            var delta = new ProximityChannelDelta();
+            var entities = new List<ProximityEntity>();
+            var sampleProvided = false;
+            var lastSpeakerProvided = false;
+            List<string>? sample = null;
+            string? lastSpeaker = null;
+            int? countValue = null;
             var channelPayload = channel.Value;
             if (channelPayload.ValueKind != JsonValueKind.Object)
             {
@@ -500,36 +505,43 @@ public sealed class MessageRouter
                 {
                     if (TryParseProximityEntity(entry, out var entity))
                     {
-                        delta.Added.Add(entity);
+                        entities.Add(entity);
                     }
                 }
             }
 
             if (channelPayload.TryGetProperty("count", out var count))
             {
-                if (count.ValueKind == JsonValueKind.Number && count.TryGetInt32(out var countValue))
+                if (count.ValueKind == JsonValueKind.Number && count.TryGetInt32(out var parsedCount))
                 {
-                    delta.Count = countValue;
+                    countValue = parsedCount;
                 }
             }
 
-            if (channelPayload.TryGetProperty("sample", out var sample) &&
-                sample.ValueKind == JsonValueKind.Array)
+            if (channelPayload.TryGetProperty("sample", out var sampleElement) &&
+                sampleElement.ValueKind == JsonValueKind.Array)
             {
-                delta.Sample = sample.EnumerateArray()
+                sampleProvided = true;
+                sample = sampleElement.EnumerateArray()
                     .Select(entry => entry.GetString())
                     .Where(value => !string.IsNullOrWhiteSpace(value))
                     .Select(value => value!)
                     .ToList();
             }
-
-            if (channelPayload.TryGetProperty("lastSpeaker", out var lastSpeaker))
+            else if (channelPayload.TryGetProperty("sample", out var sampleNull) &&
+                     sampleNull.ValueKind == JsonValueKind.Null)
             {
-                delta.LastSpeaker = lastSpeaker.GetString();
-                delta.LastSpeakerChanged = true;
+                sampleProvided = true;
+                sample = null;
             }
 
-            _state.ProximityRoster.ApplyDelta(channel.Name, delta);
+            if (channelPayload.TryGetProperty("lastSpeaker", out var lastSpeakerElement))
+            {
+                lastSpeakerProvided = true;
+                lastSpeaker = lastSpeakerElement.ValueKind == JsonValueKind.Null ? null : lastSpeakerElement.GetString();
+            }
+
+            _state.ProximityRoster.ReplaceChannel(channel.Name, entities, countValue, sample, sampleProvided, lastSpeaker, lastSpeakerProvided);
         }
     }
 
@@ -602,6 +614,7 @@ public sealed class MessageRouter
 
             if (channelPayload.TryGetProperty("sample", out var sample))
             {
+                delta.SampleChanged = true;
                 if (sample.ValueKind == JsonValueKind.Null)
                 {
                     delta.Sample = null;

@@ -65,6 +65,7 @@ public sealed class AppearanceSettings
     public ThemeConfig? CustomTheme { get; set; }
     public string? NavRingStyle { get; set; }
     public NavRingThemeConfig? NavRingTheme { get; set; }
+    public KeybindSettings? KeyBindings { get; set; }
 }
 
 public sealed class NavRingThemeConfig
