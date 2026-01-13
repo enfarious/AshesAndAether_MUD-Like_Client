@@ -1125,7 +1125,7 @@ public sealed class MudClientApp : IDisposable
         }
         else
         {
-            _entityListView.SelectedItem = -1;
+            _entityListView.SelectedItem = sourceCount > 0 ? 0 : -1;
         }
 
         UpdateEntityActionState();
