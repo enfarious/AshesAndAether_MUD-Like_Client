@@ -1,6 +1,6 @@
-# WorldOfDarkness MUD Client
+# Ashes & Aether MUD Client
 
-Frontends to connect to WorldOfDarkness
+Frontend to connect to Ashes & Aether
 
 Docs:
 
