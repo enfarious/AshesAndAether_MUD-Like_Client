@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 
 namespace WodMudClient;
@@ -7,6 +8,7 @@ public sealed class StateStore
     private readonly Dictionary<string, EntityInfo> _entitiesById = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _idByName = new(StringComparer.OrdinalIgnoreCase);
 
+    public string? PlayerId { get; private set; }
     public string? CurrentTargetId { get; private set; }
     public string? CurrentTargetName { get; private set; }
     public string? CurrentTargetToken => CurrentTargetId ?? CurrentTargetName;
@@ -15,8 +17,13 @@ public sealed class StateStore
     public IReadOnlyList<string> AvailableDirections => _availableDirections;
     public Vector3? PlayerPosition { get; private set; }
     public ProximityRosterCache ProximityRoster { get; } = new();
+    public CombatState Combat { get; } = new();
+    public VitalsState Vitals { get; } = new();
+    public PartyState Party { get; } = new();
 
     private readonly List<string> _availableDirections = new();
+    private DateTime? _lastAtbSampleAt;
+    private int? _lastAtbSample;
 
     public IReadOnlyCollection<EntityInfo> Entities => _entitiesById.Values;
 
@@ -139,6 +146,138 @@ public sealed class StateStore
     {
         PlayerPosition = position;
     }
+
+    public void UpdatePlayerId(string? playerId)
+    {
+        if (!string.IsNullOrWhiteSpace(playerId))
+        {
+            PlayerId = playerId;
+        }
+    }
+
+    public bool TryGetEntityName(string id, out string name)
+    {
+        name = string.Empty;
+        if (_entitiesById.TryGetValue(id, out var entity))
+        {
+            name = string.IsNullOrWhiteSpace(entity.Name) ? entity.Id : entity.Name;
+            return true;
+        }
+
+        return false;
+    }
+
+    public void UpdateCombatState(
+        int? atbCurrent,
+        int? atbMax,
+        bool atbProvided,
+        double? autoAttackCurrent,
+        double? autoAttackMax,
+        bool autoAttackProvided,
+        bool? inCombat,
+        bool inCombatProvided,
+        string? autoAttackTarget,
+        bool autoAttackTargetProvided)
+    {
+        if (atbProvided)
+        {
+            Combat.AtbCurrent = atbCurrent;
+            Combat.AtbMax = atbMax;
+            if (atbCurrent.HasValue)
+            {
+                var now = DateTime.UtcNow;
+                if (_lastAtbSampleAt.HasValue && _lastAtbSample.HasValue)
+                {
+                    var seconds = (now - _lastAtbSampleAt.Value).TotalSeconds;
+                    var delta = atbCurrent.Value - _lastAtbSample.Value;
+                    if (seconds > 0 && delta >= 0)
+                    {
+                        Combat.AtbRatePerSecond = delta / seconds;
+                    }
+                    else if (delta < 0)
+                    {
+                        Combat.AtbRatePerSecond = null;
+                    }
+                }
+                _lastAtbSampleAt = now;
+                _lastAtbSample = atbCurrent.Value;
+            }
+        }
+
+        if (autoAttackProvided)
+        {
+            Combat.AutoAttackCurrent = autoAttackCurrent;
+            Combat.AutoAttackMax = autoAttackMax;
+        }
+
+        if (inCombatProvided)
+        {
+            Combat.InCombat = inCombat;
+            if (inCombat == false)
+            {
+                Combat.AtbCurrent = null;
+                Combat.AtbMax = null;
+                Combat.AutoAttackCurrent = null;
+                Combat.AutoAttackMax = null;
+                Combat.AutoAttackTarget = null;
+                Combat.AtbRatePerSecond = null;
+                _lastAtbSampleAt = null;
+                _lastAtbSample = null;
+            }
+        }
+
+        if (autoAttackTargetProvided)
+        {
+            Combat.AutoAttackTarget = autoAttackTarget;
+        }
+    }
+
+    public void ClearCombatState()
+    {
+        Combat.InCombat = false;
+        Combat.AtbCurrent = null;
+        Combat.AtbMax = null;
+        Combat.AutoAttackCurrent = null;
+        Combat.AutoAttackMax = null;
+        Combat.AutoAttackTarget = null;
+        Combat.AtbRatePerSecond = null;
+        _lastAtbSampleAt = null;
+        _lastAtbSample = null;
+    }
+
+    public void UpdateVitals(
+        int? currentHp,
+        int? maxHp,
+        int? currentMana,
+        int? maxMana,
+        int? currentStamina,
+        int? maxStamina)
+    {
+        if (currentHp.HasValue)
+        {
+            Vitals.CurrentHp = currentHp.Value;
+        }
+        if (maxHp.HasValue)
+        {
+            Vitals.MaxHp = maxHp.Value;
+        }
+        if (currentMana.HasValue)
+        {
+            Vitals.CurrentMana = currentMana.Value;
+        }
+        if (maxMana.HasValue)
+        {
+            Vitals.MaxMana = maxMana.Value;
+        }
+        if (currentStamina.HasValue)
+        {
+            Vitals.CurrentStamina = currentStamina.Value;
+        }
+        if (maxStamina.HasValue)
+        {
+            Vitals.MaxStamina = maxStamina.Value;
+        }
+    }
 }
 
 public sealed class EntityInfo
@@ -151,6 +290,131 @@ public sealed class EntityInfo
     public double? Bearing { get; set; }
     public double? Elevation { get; set; }
     public double? Range { get; set; }
+}
+
+public sealed class CombatState
+{
+    public int? AtbCurrent { get; set; }
+    public int? AtbMax { get; set; }
+    public double? AtbRatePerSecond { get; set; }
+    public double? AutoAttackCurrent { get; set; }
+    public double? AutoAttackMax { get; set; }
+    public bool? InCombat { get; set; }
+    public string? AutoAttackTarget { get; set; }
+}
+
+public sealed class VitalsState
+{
+    public int? CurrentHp { get; set; }
+    public int? MaxHp { get; set; }
+    public int? CurrentMana { get; set; }
+    public int? MaxMana { get; set; }
+    public int? CurrentStamina { get; set; }
+    public int? MaxStamina { get; set; }
+}
+
+public sealed class PartyState
+{
+    private readonly Dictionary<string, PartyMember> _members = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, PartyAllyStatus> _allies = new(StringComparer.OrdinalIgnoreCase);
+
+    public IReadOnlyList<PartyMember> Members => _members.Values
+        .OrderBy(member => member.Name, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+    public string? LeaderId { get; private set; }
+
+    public bool TryGetAlly(string id, out PartyAllyStatus status)
+    {
+        return _allies.TryGetValue(id, out status);
+    }
+
+    public void SetMembers(IEnumerable<string> names)
+    {
+        _members.Clear();
+        foreach (var name in names)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            _members[name] = new PartyMember { Name = name };
+        }
+    }
+
+    public void SetLeader(string? leaderId)
+    {
+        LeaderId = string.IsNullOrWhiteSpace(leaderId) ? null : leaderId;
+    }
+
+    public void AddMember(string? id, string? name)
+    {
+        var key = !string.IsNullOrWhiteSpace(id) ? id! : name;
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return;
+        }
+
+        if (!_members.TryGetValue(key, out var member))
+        {
+            member = new PartyMember();
+            _members[key] = member;
+        }
+
+        member.Id = id ?? member.Id;
+        if (!string.IsNullOrWhiteSpace(name))
+        {
+            member.Name = name!;
+        }
+        else if (string.IsNullOrWhiteSpace(member.Name))
+        {
+            member.Name = key!;
+        }
+    }
+
+    public void RemoveMember(string? id, string? name)
+    {
+        var key = !string.IsNullOrWhiteSpace(id) ? id! : name;
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return;
+        }
+
+        _members.Remove(key!);
+        if (!string.IsNullOrWhiteSpace(id))
+        {
+            _allies.Remove(id!);
+        }
+    }
+
+    public void UpdateAllies(IEnumerable<PartyAllyStatus> allies)
+    {
+        _allies.Clear();
+        foreach (var ally in allies)
+        {
+            if (string.IsNullOrWhiteSpace(ally.EntityId))
+            {
+                continue;
+            }
+
+            _allies[ally.EntityId] = ally;
+        }
+    }
+}
+
+public sealed class PartyMember
+{
+    public string? Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+}
+
+public sealed class PartyAllyStatus
+{
+    public string EntityId { get; set; } = string.Empty;
+    public int? AtbCurrent { get; set; }
+    public int? AtbMax { get; set; }
+    public double? StaminaPct { get; set; }
+    public double? ManaPct { get; set; }
 }
 
 public sealed class ProximityRosterCache

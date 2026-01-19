@@ -12,12 +12,15 @@ public sealed class MudClientConfig
     public string ProtocolVersion { get; set; } = "1.0.0";
     public string ClientVersion { get; set; } = "0.1.0";
     public int MaxUpdateRate { get; set; } = 1;
+    public bool AutoLogin { get; set; } = true;
     public bool AutoConnect { get; set; } = false;
     public string DefaultCommandType { get; set; } = "command";
     public string Theme { get; set; } = "ember";
     public string NavRingStyle { get; set; } = "ring";
     public NavRingThemeConfig NavRingTheme { get; set; } = new();
     public ThemeConfig CustomTheme { get; set; } = new();
+    public ChatStyleConfig ChatStyle { get; set; } = new();
+    public CombatDisplayConfig CombatDisplay { get; set; } = new();
     public string PositionCommandTemplate { get; set; } = "position {target} {range_band} {angle_deg}";
     public List<string> RangeBands { get; set; } = new()
     {
@@ -28,6 +31,8 @@ public sealed class MudClientConfig
     };
     public List<MacroDefinition> Macros { get; set; } = new();
     public bool ShowDiagnosticInfo { get; set; } = false;
+    public bool ShowDevNotices { get; set; } = false;
+    public bool WrapLogLines { get; set; } = true;
     public KeybindSettings KeyBindings { get; set; } = KeybindSettings.CreateDefaults();
 
     public static MudClientConfig Load(string path)
@@ -43,6 +48,18 @@ public sealed class MudClientConfig
 
         var contents = File.ReadAllText(path);
         var config = JsonSerializer.Deserialize<MudClientConfig>(contents, JsonOptions) ?? new MudClientConfig();
+        config.ChatStyle ??= new ChatStyleConfig();
+        config.CombatDisplay ??= new CombatDisplayConfig();
+        if (config.CombatDisplay.ColorKeys == null || config.CombatDisplay.ColorKeys.Count == 0)
+        {
+            config.CombatDisplay.ColorKeys = new CombatDisplayConfig().ColorKeys;
+        }
+        else
+        {
+            config.CombatDisplay.ColorKeys = new Dictionary<string, string>(
+                config.CombatDisplay.ColorKeys,
+                StringComparer.OrdinalIgnoreCase);
+        }
         config.KeyBindings ??= KeybindSettings.CreateDefaults();
         if (config.KeyBindings.Commands.Count == 0)
         {
@@ -80,6 +97,33 @@ public sealed class ThemeConfig
     public string? AccentBackground { get; set; }
     public string? MutedForeground { get; set; }
     public string? MutedBackground { get; set; }
+}
+
+public sealed class ChatStyleConfig
+{
+    public string? Foreground { get; set; }
+    public string? Background { get; set; }
+}
+
+public sealed class CombatDisplayConfig
+{
+    public string Style { get; set; } = "compact";
+    public bool ShowFx { get; set; } = false;
+    public bool ShowImpactFx { get; set; } = true;
+    public bool UseColorKeys { get; set; } = true;
+    public Dictionary<string, string> ColorKeys { get; set; } = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["player.color.hit"] = "white",
+        ["player.color.crit"] = "brightyellow",
+        ["player.color.crit_pen"] = "brightyellow",
+        ["player.color.penetrate"] = "brightyellow",
+        ["player.color.deflect"] = "brightcyan",
+        ["player.color.glance"] = "gray",
+        ["player.color.miss"] = "darkgray",
+        ["player.color.take_damage"] = "brightred",
+        ["player.color.kill"] = "brightmagenta",
+        ["player.color.die"] = "brightred"
+    };
 }
 
 public sealed class KeybindSettings

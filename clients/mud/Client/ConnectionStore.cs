@@ -49,6 +49,7 @@ public sealed class ConnectionProfile
     public string? Password { get; set; }
     public string? CharacterName { get; set; }
     public string AuthMethod { get; set; } = "guest";
+    public bool? AutoLoginOverride { get; set; }
     public AppearanceSettings Settings { get; set; } = new();
     public Dictionary<string, AppearanceSettings> CharacterSettings { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -63,6 +64,8 @@ public sealed class AppearanceSettings
 {
     public string? Theme { get; set; }
     public ThemeConfig? CustomTheme { get; set; }
+    public ChatStyleConfig? ChatStyle { get; set; }
+    public CombatDisplayConfig? CombatDisplay { get; set; }
     public string? NavRingStyle { get; set; }
     public NavRingThemeConfig? NavRingTheme { get; set; }
     public KeybindSettings? KeyBindings { get; set; }

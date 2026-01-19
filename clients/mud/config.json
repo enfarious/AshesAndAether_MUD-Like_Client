@@ -7,16 +7,44 @@
   "protocolVersion": "1.0.0",
   "clientVersion": "0.1.0",
   "maxUpdateRate": 1,
-  "showDiagnosticInfo": true,
-  "autoConnect": true,
-  "defaultCommandType": "chat",
+  "autoLogin": false,
+  "autoConnect": false,
+  "defaultCommandType": "command",
   "theme": "ember",
+  "navRingStyle": "ring",
+  "navRingTheme": {
+    "foreground": null,
+    "background": null
+  },
   "customTheme": {
     "normalForeground": "BrightWhite",
     "normalBackground": "Black",
     "accentForeground": "BrightCyan",
     "accentBackground": "Black",
-    "mutedForeground": "DarkGray"
+    "mutedForeground": "DarkGray",
+    "mutedBackground": null
+  },
+  "chatStyle": {
+    "foreground": "",
+    "background": ""
+  },
+  "combatDisplay": {
+    "style": "compact",
+    "showFx": false,
+    "showImpactFx": true,
+    "useColorKeys": true,
+    "colorKeys": {
+      "player.color.hit": "white",
+      "player.color.crit": "brightyellow",
+      "player.color.crit_pen": "brightyellow",
+      "player.color.penetrate": "brightyellow",
+      "player.color.deflect": "brightcyan",
+      "player.color.glance": "gray",
+      "player.color.miss": "darkgray",
+      "player.color.take_damage": "brightred",
+      "player.color.kill": "brightmagenta",
+      "player.color.die": "brightred"
+    }
   },
   "positionCommandTemplate": "position {target} {range_band} {angle_deg}",
   "rangeBands": [
@@ -26,13 +54,74 @@
     "ranged_long"
   ],
   "macros": [
-    { "label": "North", "command": "Walk.N" },
-    { "label": "South", "command": "Walk.S" },
-    { "label": "East", "command": "Walk.E" },
-    { "label": "West", "command": "Walk.W" },
-    { "label": "Stop", "command": "Stop" },
-    { "label": "Look", "command": "look" },
-    { "label": "Who", "command": "who" },
-    { "label": "Inv", "command": "inventory" }
-  ]
+    {
+      "label": "North",
+      "command": "Walk.N"
+    },
+    {
+      "label": "South",
+      "command": "Walk.S"
+    },
+    {
+      "label": "East",
+      "command": "Walk.E"
+    },
+    {
+      "label": "West",
+      "command": "Walk.W"
+    },
+    {
+      "label": "Stop",
+      "command": "Stop"
+    },
+    {
+      "label": "Look",
+      "command": "look"
+    },
+    {
+      "label": "Who",
+      "command": "who"
+    },
+    {
+      "label": "Inv",
+      "command": "inventory"
+    }
+  ],
+  "showDiagnosticInfo": true,
+  "showDevNotices": false,
+  "wrapLogLines": true,
+  "keyBindings": {
+    "bindings": {
+      "ability.1": "1",
+      "ability.2": "2",
+      "ability.3": "3",
+      "ability.4": "4",
+      "ability.5": "5",
+      "ability.6": "6",
+      "ability.7": "7",
+      "ability.8": "8",
+      "quick.1": "9",
+      "quick.2": "0",
+      "quick.3": "-",
+      "quick.4": "=",
+      "companion.prev": ",",
+      "companion.next": "."
+    },
+    "commands": {
+      "ability.1": "/cast ability1",
+      "ability.2": "/cast ability2",
+      "ability.3": "/cast ability3",
+      "ability.4": "/cast ability4",
+      "ability.5": "/cast ability5",
+      "ability.6": "/cast ability6",
+      "ability.7": "/cast ability7",
+      "ability.8": "/cast ability8",
+      "quick.1": "/use item1",
+      "quick.2": "/use item2",
+      "quick.3": "/use item3",
+      "quick.4": "/use item4",
+      "companion.prev": "/companion prev",
+      "companion.next": "/companion next"
+    }
+  }
 }

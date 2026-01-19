@@ -12,6 +12,8 @@ namespace WodMudClient;
 public sealed class MudClientApp : IDisposable
 {
     private const int MaxLogLines = 2000;
+    private const double ShakeThreshold = 0.5;
+    private static readonly TimeSpan MovementKeyWindow = TimeSpan.FromMilliseconds(650);
     private static readonly string[] NavigationSpeeds = { "run", "jog", "walk" };
     private static readonly IReadOnlyList<KeybindAction> KeybindActions = new[]
     {
@@ -51,6 +53,9 @@ public sealed class MudClientApp : IDisposable
     private readonly Dictionary<string, string> _resolvedKeyBindings = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _keybindActionsByKey = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _resolvedKeyCommands = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _lastMovementKeyTime = DateTime.MinValue;
+    private char _lastMovementKey;
+    private int _movementKeyCount;
 
     private readonly List<LogEntry> _logEntries = new();
     private readonly List<string> _history = new();
@@ -62,13 +67,17 @@ public sealed class MudClientApp : IDisposable
     private Label _statusLabel = null!;
     private Label _targetLabel = null!;
     private Label _movementLabel = null!;
+    private Label _combatLabel = null!;
+    private Label _vitalsLabel = null!;
     private FrameView _logFrame = null!;
     private View _sidebar = null!;
-    private Label _navPositionLabel = null!;
-    private Label _navHeadingLabel = null!;
-    private Label _ringInfoLabel = null!;
     private PositionRingView _ringView = null!;
     private FrameView _navigationFrame = null!;
+    private FrameView _partyFrame = null!;
+    private ListView _partyListView = null!;
+    private CompassView _compassView = null!;
+    private string? _pendingDirection;
+    private string? _pendingSpeed;
     private FrameView _rosterFrame = null!;
     private ListView _entityListView = null!;
     private Button _approachButton = null!;
@@ -103,7 +112,7 @@ public sealed class MudClientApp : IDisposable
         _configPath = configPath;
         _connectionsPath = connectionsPath;
         _connections = _connectionStore.Load(_connectionsPath);
-        _router = new MessageRouter(_state);
+        _router = new MessageRouter(_state, _config.CombatDisplay);
         _sendMode = SocketMessageModeParser.Parse(_config.SendMode, SocketMessageMode.Event);
         _receiveMode = SocketMessageModeParser.Parse(_config.ReceiveMode, SocketMessageMode.Event);
         _defaultAppearance = BuildAppearanceFromConfig(_config);
@@ -115,6 +124,9 @@ public sealed class MudClientApp : IDisposable
         Application.Init();
         BuildUi();
         WireTransport();
+        AppendLogLine("Client ready. Use F5 or /connect to connect.");
+        AppendLogLine($"Config: {_configPath}");
+        AppendLogLine($"Connections: {_connectionsPath}");
 
         Application.MainLoop.AddTimeout(TimeSpan.FromMilliseconds(1), _ =>
         {
@@ -198,7 +210,7 @@ public sealed class MudClientApp : IDisposable
             X = 0,
             Y = 0,
             Width = Dim.Fill(),
-            Height = 4
+            Height = 6
         };
 
         _statusLabel = new Label("Status: disconnected")
@@ -225,7 +237,23 @@ public sealed class MudClientApp : IDisposable
             Height = 1
         };
 
-        header.Add(_statusLabel, _targetLabel, _movementLabel);
+        _combatLabel = new Label("Combat: idle")
+        {
+            X = 1,
+            Y = 3,
+            Width = Dim.Fill(),
+            Height = 1
+        };
+
+        _vitalsLabel = new Label("Vitals: --")
+        {
+            X = 1,
+            Y = 4,
+            Width = Dim.Fill(),
+            Height = 1
+        };
+
+        header.Add(_statusLabel, _targetLabel, _movementLabel, _combatLabel, _vitalsLabel);
 
         _logFrame = new FrameView("Log")
         {
@@ -284,56 +312,62 @@ public sealed class MudClientApp : IDisposable
             X = 0,
             Y = 0,
             Width = Dim.Fill(),
-            Height = 15
+            Height = 10
         };
 
-        _navPositionLabel = new Label("Loc: unknown")
+        _compassView = new CompassView
         {
             X = 1,
             Y = 0,
             Width = Dim.Fill(),
-            Height = 1
+            Height = 8,
+            CanFocus = true
         };
 
-        _navHeadingLabel = new Label("Head: -- Spd: idle")
-        {
-            X = 1,
-            Y = 1,
-            Width = Dim.Fill(),
-            Height = 1
-        };
-
-        var initialSpeed = NavigationSpeeds.LastOrDefault() ?? "walk";
-        _ringInfoLabel = new Label($"Select: N {initialSpeed}")
-        {
-            X = 1,
-            Y = 2,
-            Width = Dim.Fill(),
-            Height = 1
-        };
+        _compassView.DirectionSelected += OnCompassDirectionSelected;
+        _compassView.SpeedSelected += OnCompassSpeedSelected;
+        _compassView.StopSelected += OnCompassStopSelected;
 
         _ringView = new PositionRingView
         {
-            X = 1,
-            Y = 3,
-            Width = Dim.Fill(),
-            Height = Dim.Fill(),
+            X = 0,
+            Y = 0,
+            Width = 0,
+            Height = 0,
             CanFocus = true,
             RangeBands = NavigationSpeeds,
             AngleStep = 45,
-            WantMousePositionReports = true
+            WantMousePositionReports = true,
+            Visible = false
         };
         _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
         _ringView.SelectionConfirmed += OnRingSelectionConfirmed;
         _ringView.SelectionChanged += OnRingSelectionChanged;
         _ringView.StopRequested += OnRingStopRequested;
 
-        _navigationFrame.Add(_navPositionLabel, _navHeadingLabel, _ringInfoLabel, _ringView);
+        _navigationFrame.Add(_compassView);
+
+        _partyFrame = new FrameView("Party")
+        {
+            X = 0,
+            Y = Pos.Bottom(_navigationFrame),
+            Width = Dim.Fill(),
+            Height = 6
+        };
+
+        _partyListView = new ListView(new[] { "No party members yet." })
+        {
+            X = 0,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = Dim.Fill()
+        };
+        _partyFrame.Add(_partyListView);
 
         _rosterFrame = new FrameView("Nearby Entities")
         {
             X = 0,
-            Y = Pos.Bottom(_navigationFrame),
+            Y = Pos.Bottom(_partyFrame),
             Width = Dim.Fill(),
             Height = Dim.Fill()
         };
@@ -414,11 +448,14 @@ public sealed class MudClientApp : IDisposable
         entityActionBar.Add(_examineButton, _talkButton, _greetButton, _approachButton, _withdrawButton, _engageToggleButton, _entityActionLabel);
         _rosterFrame.Add(_entityListView, entityActionBar);
 
-        _sidebar.Add(_navigationFrame, _rosterFrame);
+        _sidebar.Add(_navigationFrame, _partyFrame, _rosterFrame);
 
         window.Add(header, _logFrame, inputFrame, _sidebar);
         RefreshEntityRoster();
         RefreshMovementState();
+        RefreshCombatState();
+        RefreshVitalsState();
+        RefreshPartyState();
 
         UpdateSidebarLayout(GetSidebarWidth);
         window.LayoutComplete += _ => UpdateSidebarLayout(GetSidebarWidth);
@@ -445,7 +482,11 @@ public sealed class MudClientApp : IDisposable
                 _isConnected = false;
                 _activeWorldName = null;
                 _activeCharacterName = null;
+                _state.ClearCombatState();
                 RefreshSessionHeader();
+                RefreshCombatState();
+                RefreshVitalsState();
+                RefreshPartyState();
                 AppendLogLine($"Disconnected: {reason}");
             });
         };
@@ -469,12 +510,15 @@ public sealed class MudClientApp : IDisposable
                     ApplyCharacterFromWorldEntry(message.Payload);
                 }
 
-                foreach (var line in _router.Handle(message, _config.ShowDiagnosticInfo))
+                foreach (var line in _router.Handle(message, _config.ShowDiagnosticInfo, _config.ShowDevNotices))
                 {
                     AppendLogLine(line);
                 }
                 RefreshTargetState();
                 RefreshMovementState();
+                RefreshCombatState();
+                RefreshVitalsState();
+                RefreshPartyState();
                 RefreshEntityRoster();
 
                 if (_pendingCharacterDialog)
@@ -657,6 +701,25 @@ public sealed class MudClientApp : IDisposable
             return;
         }
 
+        var key = args.KeyEvent.Key;
+        if (key == (Key)'/' || key == Key.Space || key == Key.Enter)
+        {
+            _inputField.SetFocus();
+            if (key != Key.Enter && _inputField.ProcessKey(args.KeyEvent))
+            {
+                args.Handled = true;
+                return;
+            }
+
+            args.Handled = true;
+            return;
+        }
+
+        if (TryHandleMovementGridKey(args))
+        {
+            return;
+        }
+
         if (TryHandleKeybind(args))
         {
             return;
@@ -668,6 +731,12 @@ public sealed class MudClientApp : IDisposable
         }
 
         _inputField.SetFocus();
+        if (args.KeyEvent.Key == Key.Enter)
+        {
+            args.Handled = true;
+            return;
+        }
+
         if (_inputField.ProcessKey(args.KeyEvent))
         {
             args.Handled = true;
@@ -721,6 +790,90 @@ public sealed class MudClientApp : IDisposable
         }
     }
 
+    private bool TryHandleMovementGridKey(View.KeyEventEventArgs args)
+    {
+        var key = args.KeyEvent.Key;
+        if ((key & (Key.AltMask | Key.CtrlMask)) != 0)
+        {
+            return false;
+        }
+
+        if (!TryGetMovementGridToken(key, out var token))
+        {
+            return false;
+        }
+
+        if (token == 'S')
+        {
+            _ = SendMovementCommandAsync(new MovementCommand("stop", null, null, null, null));
+            args.Handled = true;
+            return true;
+        }
+
+        var now = DateTime.UtcNow;
+        if (token != _lastMovementKey || now - _lastMovementKeyTime > MovementKeyWindow)
+        {
+            _movementKeyCount = 0;
+        }
+
+        _movementKeyCount++;
+        _lastMovementKey = token;
+        _lastMovementKeyTime = now;
+
+        var speed = _movementKeyCount switch
+        {
+            1 => "walk",
+            2 => "jog",
+            _ => "run"
+        };
+
+        var compass = token switch
+        {
+            'Q' => "NW",
+            'W' => "N",
+            'E' => "NE",
+            'A' => "W",
+            'D' => "E",
+            'Z' => "SW",
+            'X' => "S",
+            'C' => "SE",
+            _ => string.Empty
+        };
+
+        if (!string.IsNullOrWhiteSpace(compass))
+        {
+            _ = SendMovementCommandAsync(new MovementCommand(speed, null, compass, null, null));
+        }
+
+        args.Handled = true;
+        return true;
+    }
+
+    private static bool TryGetMovementGridToken(Key key, out char token)
+    {
+        token = '\0';
+        var raw = key & Key.CharMask;
+        if (raw == 0)
+        {
+            return false;
+        }
+
+        var ch = (char)raw;
+        if (char.IsControl(ch))
+        {
+            return false;
+        }
+
+        ch = char.ToUpperInvariant(ch);
+        if (ch is 'Q' or 'W' or 'E' or 'A' or 'S' or 'D' or 'Z' or 'X' or 'C')
+        {
+            token = ch;
+            return true;
+        }
+
+        return false;
+    }
+
     private bool IsFocusWithinMainWindow()
     {
         var focused = Application.Top?.Focused;
@@ -744,6 +897,11 @@ public sealed class MudClientApp : IDisposable
         }
 
         if (key == (Key)'/')
+        {
+            return true;
+        }
+
+        if (key == Key.Enter)
         {
             return true;
         }
@@ -898,6 +1056,12 @@ public sealed class MudClientApp : IDisposable
             return;
         }
 
+        if (string.Equals(_config.DefaultCommandType, "command", StringComparison.OrdinalIgnoreCase))
+        {
+            await SendSlashCommandAsync($"/say {text}");
+            return;
+        }
+
         var payload = new { text };
         await SendMessageAsync(_config.DefaultCommandType, payload);
         AppendLogLine($"> {text}");
@@ -994,16 +1158,15 @@ public sealed class MudClientApp : IDisposable
 
     private void OnRingSelectionChanged(PositionSelection selection)
     {
-        var direction = HeadingToCompass(selection.AngleDegrees);
-        var speed = string.IsNullOrWhiteSpace(selection.RangeBand) ? "walk" : selection.RangeBand.ToLowerInvariant();
-        _ringInfoLabel.Text = $"Select: {direction} {speed}";
+        _compassView.SelectedSpeed = selection.RangeBand;
+        _compassView.SetNeedsDisplay();
     }
 
     private void OnRingSelectionConfirmed(PositionSelection selection)
     {
         var direction = HeadingToCompass(selection.AngleDegrees);
         var speed = string.IsNullOrWhiteSpace(selection.RangeBand) ? "walk" : selection.RangeBand.ToLowerInvariant();
-        _ = SendSlashCommandAsync($"/move compass:{direction} speed:{speed}");
+        _ = SendMovementCommandAsync(new MovementCommand(speed, null, direction, null, null));
         _inputField.SetFocus();
     }
 
@@ -1011,6 +1174,118 @@ public sealed class MudClientApp : IDisposable
     {
         _ = SendSlashCommandAsync("/stop");
         _inputField.SetFocus();
+    }
+
+    private void OnCompassDirectionSelected(string direction)
+    {
+        if (string.IsNullOrWhiteSpace(direction))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_pendingSpeed))
+        {
+            SendCompassMove(direction, _pendingSpeed);
+            _pendingDirection = null;
+            _pendingSpeed = null;
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_pendingDirection))
+        {
+            var speed = ResolveSpeedForCommand();
+            if (!string.IsNullOrWhiteSpace(speed))
+            {
+                SendCompassMove(direction, speed);
+                _pendingDirection = null;
+                return;
+            }
+        }
+
+        _pendingDirection = direction;
+    }
+
+    private void OnCompassSpeedSelected(string speed)
+    {
+        if (string.IsNullOrWhiteSpace(speed))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_pendingDirection))
+        {
+            SendCompassMove(_pendingDirection, speed);
+            _pendingDirection = null;
+            _pendingSpeed = null;
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_pendingSpeed))
+        {
+            var direction = ResolveDirectionForCommand();
+            if (!string.IsNullOrWhiteSpace(direction))
+            {
+                SendCompassMove(direction, speed);
+                _pendingSpeed = null;
+                return;
+            }
+        }
+
+        _pendingSpeed = speed;
+    }
+
+    private void OnCompassStopSelected()
+    {
+        _pendingDirection = null;
+        _pendingSpeed = null;
+        _ = SendSlashCommandAsync("/stop");
+        _inputField.SetFocus();
+    }
+
+    private void SendCompassMove(string direction, string speed)
+    {
+        _ = SendMovementCommandAsync(new MovementCommand(NormalizeSpeed(speed), null, direction, null, null));
+        _inputField.SetFocus();
+    }
+
+    private string? ResolveSpeedForCommand()
+    {
+        if (!string.IsNullOrWhiteSpace(_pendingSpeed))
+        {
+            return NormalizeSpeed(_pendingSpeed);
+        }
+
+        if (!string.IsNullOrWhiteSpace(_state.CurrentSpeed))
+        {
+            return NormalizeSpeed(_state.CurrentSpeed);
+        }
+
+        return "walk";
+    }
+
+    private string? ResolveDirectionForCommand()
+    {
+        if (!string.IsNullOrWhiteSpace(_pendingDirection))
+        {
+            return _pendingDirection;
+        }
+
+        if (_state.CurrentHeading.HasValue)
+        {
+            return HeadingToCompass(NormalizeHeading(_state.CurrentHeading.Value));
+        }
+
+        return null;
+    }
+
+    private static string NormalizeSpeed(string speed)
+    {
+        var normalized = speed.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "sprint" => "run",
+            _ => normalized
+        };
     }
 
     private void SetNavigationStyle(NavigationRingStyle style)
@@ -1055,14 +1330,130 @@ public sealed class MudClientApp : IDisposable
             : "none";
 
         _movementLabel.Text = $"Movement: {speed} | Facing: {headingCompass} | Available: {directions}";
+        _compassView.SelectedSpeed = _pendingSpeed ?? _state.CurrentSpeed;
+        _compassView.SelectedDirection = _pendingDirection ?? (headingDegrees.HasValue ? HeadingToCompass(headingDegrees.Value) : null);
+        _compassView.SetNeedsDisplay();
+    }
 
-        var positionText = _state.PlayerPosition.HasValue
-            ? $"{_state.PlayerPosition.Value.X:0.#},{_state.PlayerPosition.Value.Y:0.#},{_state.PlayerPosition.Value.Z:0.#}"
-            : "unknown";
-        _navPositionLabel.Text = $"Loc: {positionText}";
-        _navHeadingLabel.Text = headingDegrees.HasValue
-            ? $"Head: {(int)Math.Round(headingDegrees.Value):000}deg {headingCompass} Spd: {speed}"
-            : $"Head: -- Spd: {speed}";
+    private void RefreshCombatState()
+    {
+        var combat = _state.Combat;
+        if (combat.InCombat == false)
+        {
+            _combatLabel.Text = "Combat: idle";
+            return;
+        }
+
+        if (!combat.AtbCurrent.HasValue && !combat.AutoAttackCurrent.HasValue)
+        {
+            _combatLabel.Text = combat.InCombat == true ? "Combat: active" : "Combat: idle";
+            return;
+        }
+
+        var atbText = "ATB: --";
+        if (combat.AtbCurrent.HasValue && combat.AtbMax.HasValue && combat.AtbMax.Value > 0)
+        {
+            var charges = combat.AtbCurrent.Value / 100;
+            var maxCharges = Math.Max(1, combat.AtbMax.Value / 100);
+            atbText = $"ATB: {combat.AtbCurrent.Value}/{combat.AtbMax.Value} ({charges}/{maxCharges})";
+        }
+        else if (combat.AtbCurrent.HasValue)
+        {
+            atbText = $"ATB: {combat.AtbCurrent.Value}";
+        }
+
+        var autoAttackText = "AA: --";
+        if (combat.AutoAttackCurrent.HasValue && combat.AutoAttackMax.HasValue && combat.AutoAttackMax.Value > 0)
+        {
+            var percent = Math.Clamp(combat.AutoAttackCurrent.Value / combat.AutoAttackMax.Value * 100.0, 0, 100);
+            autoAttackText = $"AA: {combat.AutoAttackCurrent.Value:0.0}/{combat.AutoAttackMax.Value:0.0}s ({percent:0}%)";
+        }
+        else if (combat.AutoAttackCurrent.HasValue)
+        {
+            autoAttackText = $"AA: {combat.AutoAttackCurrent.Value:0.0}s";
+        }
+
+        var targetText = string.IsNullOrWhiteSpace(combat.AutoAttackTarget) ? string.Empty : $" tgt:{combat.AutoAttackTarget}";
+        var rateText = string.Empty;
+        if (combat.AtbRatePerSecond.HasValue)
+        {
+            var rate = combat.AtbRatePerSecond.Value;
+            rateText = rate >= 0 ? $" +{rate:0.#}/s" : $" {rate:0.#}/s";
+        }
+        _combatLabel.Text = $"{atbText}{rateText} | {autoAttackText}{targetText}";
+    }
+
+    private void RefreshVitalsState()
+    {
+        var vitals = _state.Vitals;
+        var hpText = vitals.CurrentHp.HasValue && vitals.MaxHp.HasValue
+            ? $"HP {vitals.CurrentHp.Value}/{vitals.MaxHp.Value}"
+            : vitals.CurrentHp.HasValue
+                ? $"HP {vitals.CurrentHp.Value}"
+                : "HP --";
+        var mpText = vitals.CurrentMana.HasValue && vitals.MaxMana.HasValue
+            ? $"MP {vitals.CurrentMana.Value}/{vitals.MaxMana.Value}"
+            : vitals.CurrentMana.HasValue
+                ? $"MP {vitals.CurrentMana.Value}"
+                : "MP --";
+        var staminaText = vitals.CurrentStamina.HasValue && vitals.MaxStamina.HasValue
+            ? $"End {vitals.CurrentStamina.Value}/{vitals.MaxStamina.Value}"
+            : vitals.CurrentStamina.HasValue
+                ? $"End {vitals.CurrentStamina.Value}"
+                : "End --";
+
+        _vitalsLabel.Text = $"Vitals: {hpText} | {mpText} | {staminaText}";
+    }
+
+    private void RefreshPartyState()
+    {
+        if (_partyListView == null)
+        {
+            return;
+        }
+
+        var members = _state.Party.Members;
+        if (members.Count == 0)
+        {
+            _partyListView.SetSource(new[] { "No party members yet." });
+            return;
+        }
+
+        var lines = new List<string>();
+        foreach (var member in members)
+        {
+            var label = member.Name;
+            if (!string.IsNullOrWhiteSpace(member.Id) &&
+                string.Equals(member.Id, _state.Party.LeaderId, StringComparison.OrdinalIgnoreCase))
+            {
+                label = $"* {label}";
+            }
+            if (!string.IsNullOrWhiteSpace(member.Id) &&
+                string.Equals(member.Id, _state.PlayerId, StringComparison.OrdinalIgnoreCase))
+            {
+                label = $"{label} (You)";
+            }
+            if (!string.IsNullOrWhiteSpace(member.Id) &&
+                _state.Party.TryGetAlly(member.Id, out var ally))
+            {
+                var atbText = ally.AtbCurrent.HasValue && ally.AtbMax.HasValue
+                    ? $"ATB {ally.AtbCurrent}/{ally.AtbMax}"
+                    : string.Empty;
+                var staminaText = ally.StaminaPct.HasValue ? $"End {ally.StaminaPct.Value * 100:0}%" : string.Empty;
+                var manaText = ally.ManaPct.HasValue ? $"MP {ally.ManaPct.Value * 100:0}%" : string.Empty;
+                var detailParts = new[] { atbText, staminaText, manaText }
+                    .Where(part => !string.IsNullOrWhiteSpace(part));
+                var detail = string.Join(" ", detailParts);
+                if (!string.IsNullOrWhiteSpace(detail))
+                {
+                    label = $"{label} [{detail}]";
+                }
+            }
+
+            lines.Add(label);
+        }
+
+        _partyListView.SetSource(lines);
     }
 
     private void RefreshSessionHeader()
@@ -1073,6 +1464,7 @@ public sealed class MudClientApp : IDisposable
         var character = string.IsNullOrWhiteSpace(_activeCharacterName) ? "?" : _activeCharacterName;
         _statusLabel.Text = $"Status: {status} | World: {world} | User: {account}/{character}";
     }
+
 
     private void UpdateSidebarLayout(Func<int, int> getSidebarWidth)
     {
@@ -1090,6 +1482,18 @@ public sealed class MudClientApp : IDisposable
         _logFrame.Width = logWidth;
         _sidebar.X = logWidth;
         _sidebar.Width = sidebarWidth;
+        UpdateLogWrapWidth();
+    }
+
+    private void UpdateLogWrapWidth()
+    {
+        if (_logSource == null || _logView == null)
+        {
+            return;
+        }
+
+        var width = Math.Max(0, _logView.Bounds.Width);
+        _logSource.RebuildRows(width, _config.WrapLogLines);
     }
 
     private void RefreshEntityRoster()
@@ -1207,6 +1611,15 @@ public sealed class MudClientApp : IDisposable
             return;
         }
 
+        if (approach)
+        {
+            var token = FormatCommandValue(GetEntityCommandToken(entity.Value));
+            var approachSpeed = "walk";
+            await SendSlashCommandAsync($"/move to:{token} range:melee {approachSpeed}");
+            AppendLogLine($"Approaching {GetEntityDisplayName(entity.Value)} (melee range).");
+            return;
+        }
+
         var heading = DetermineHeadingForEntity(entity.Value, approach);
         if (!heading.HasValue)
         {
@@ -1214,11 +1627,10 @@ public sealed class MudClientApp : IDisposable
             return;
         }
 
-        var speed = approach ? "walk" : "run";
-        var movement = new MovementCommand(speed, heading, null);
+        var withdrawSpeed = "run";
+        var movement = new MovementCommand(withdrawSpeed, heading, null, null, null);
         await SendMovementCommandAsync(movement);
-        var verb = approach ? "Approaching" : "Withdrawing from";
-        AppendLogLine($"{verb} {GetEntityDisplayName(entity.Value)} ({heading.Value}deg).");
+        AppendLogLine($"Withdrawing from {GetEntityDisplayName(entity.Value)} ({heading.Value}deg).");
     }
 
     private void SendEntityCommand(string command)
@@ -1244,19 +1656,17 @@ public sealed class MudClientApp : IDisposable
             return;
         }
 
-        var token = GetEntityCommandToken(entity.Value);
+        var token = entity.Value.Id;
         var key = BuildEngagementKey(entity.Value);
         if (_engagedEntities.Contains(key))
         {
             _engagedEntities.Remove(key);
-            _ = SendSlashCommandAsync($"/disengage {token}".Trim());
-            AppendLogLine($"> /disengage {token}".Trim());
         }
         else
         {
             _engagedEntities.Add(key);
-            _ = SendSlashCommandAsync($"/engage {token}".Trim());
-            AppendLogLine($"> /engage {token}".Trim());
+            _ = SendSlashCommandAsync($"/attack {token}".Trim());
+            AppendLogLine($"> /attack {token}".Trim());
         }
 
         UpdateEngageButtonLabel(entity.Value);
@@ -1430,21 +1840,59 @@ public sealed class MudClientApp : IDisposable
         return null;
     }
 
+    private void AppendLogLine(LogLine line)
+    {
+        AppendLogLine(line.Text, line.ColorKey, line.Shake);
+    }
+
     private void AppendLogLine(string line)
+    {
+        AppendLogLine(line, null, null);
+    }
+
+    private void AppendLogLine(string line, string? colorKey, double? shake)
     {
         var formatted = _showTimestamps
             ? $"[{DateTime.Now:HH:mm:ss}] {line}"
             : line;
 
         var kind = LogListSource.Classify(line);
-        _logEntries.Add(new LogEntry(formatted, kind));
+        var foreground = ResolveCombatColor(colorKey);
+        var effectStrength = shake.HasValue && shake.Value > ShakeThreshold
+            ? Math.Clamp(shake.Value, 0, 1)
+            : 0;
+        var effect = effectStrength > 0 ? LogEffect.Shake : LogEffect.None;
+        var effectSeed = effect == LogEffect.Shake ? Random.Shared.Next() : 0;
+        _logEntries.Add(new LogEntry(formatted, kind, foreground, null, effect, effectStrength, effectSeed));
         if (_logEntries.Count > MaxLogLines)
         {
             _logEntries.RemoveRange(0, _logEntries.Count - MaxLogLines);
         }
 
+        UpdateLogWrapWidth();
         _logView.SetNeedsDisplay();
         ScrollLogToEnd();
+    }
+
+    private Color? ResolveCombatColor(string? colorKey)
+    {
+        if (!_config.CombatDisplay.UseColorKeys || string.IsNullOrWhiteSpace(colorKey))
+        {
+            return null;
+        }
+
+        if (_config.CombatDisplay.ColorKeys.TryGetValue(colorKey, out var colorName) &&
+            ColorParser.TryParse(colorName, out var mapped))
+        {
+            return mapped;
+        }
+
+        if (ColorParser.TryParse(colorKey, out var direct))
+        {
+            return direct;
+        }
+
+        return null;
     }
 
     private void ScrollLogToEnd()
@@ -1626,14 +2074,18 @@ public sealed class MudClientApp : IDisposable
         {
             Checked = _config.AutoConnect
         };
+        var autoLoginToggle = new CheckBox(1, 12, "Auto-login after connect")
+        {
+            Checked = _config.AutoLogin
+        };
         var statusLabel = new Label(string.Empty)
         {
             X = 1,
-            Y = 13,
+            Y = 14,
             Width = Dim.Fill(2)
         };
 
-        dialog.Add(listView, preferredToggle, autoConnectToggle, statusLabel);
+        dialog.Add(listView, preferredToggle, autoConnectToggle, autoLoginToggle, statusLabel);
 
         void RefreshList()
         {
@@ -1681,6 +2133,12 @@ public sealed class MudClientApp : IDisposable
         autoConnectToggle.Toggled += _ =>
         {
             _config.AutoConnect = autoConnectToggle.Checked;
+            SaveConfig();
+        };
+
+        autoLoginToggle.Toggled += _ =>
+        {
+            _config.AutoLogin = autoLoginToggle.Checked;
             SaveConfig();
         };
 
@@ -1887,6 +2345,19 @@ public sealed class MudClientApp : IDisposable
             Width = 40
         };
 
+        var autoLoginLabel = new Label("Auto-login:")
+        {
+            X = 1,
+            Y = 19
+        };
+        var autoLoginIndex = existing?.AutoLoginOverride switch
+        {
+            true => 1,
+            false => 2,
+            _ => 0
+        };
+        var autoLoginGroup = new RadioGroup(12, 19, new[] { (ustring)"Default", "On", "Off" }, autoLoginIndex);
+
         dialog.Add(
             nameLabel, nameField,
             hostLabel, hostField,
@@ -1895,7 +2366,8 @@ public sealed class MudClientApp : IDisposable
             authLabel, authGroup,
             accountLabel, accountField,
             passwordLabel, passwordField,
-            characterLabel, characterField);
+            characterLabel, characterField,
+            autoLoginLabel, autoLoginGroup);
 
         ConnectionProfile? result = null;
 
@@ -1931,6 +2403,12 @@ public sealed class MudClientApp : IDisposable
                 2 => "creds",
                 _ => "guest"
             };
+            result.AutoLoginOverride = autoLoginGroup.SelectedItem switch
+            {
+                1 => true,
+                2 => false,
+                _ => null
+            };
             Application.RequestStop();
         };
 
@@ -1964,51 +2442,19 @@ public sealed class MudClientApp : IDisposable
     private void ConnectToConnection(ConnectionProfile connection)
     {
         _activeConnection = connection;
-        _activeAccountName = connection.AccountName;
-        _activeCharacterName = string.IsNullOrWhiteSpace(connection.CharacterName) ? null : connection.CharacterName;
+        _activeAccountName = null;
+        _activeCharacterName = null;
         _config.ServerUrl = connection.BuildUrl();
         ApplyAppearanceForActiveProfile();
         RefreshSessionHeader();
+        AppendLogLine($"Connecting to {connection.Name} ({_config.ServerUrl})...");
         _ = ConnectAsync(_config.ServerUrl);
     }
 
-    private async Task TrySendAutoAuthAsync()
+    private Task TrySendAutoAuthAsync()
     {
-        if (_activeConnection == null)
-        {
-            return;
-        }
-
-        var account = _activeConnection.AccountName;
-        if (string.IsNullOrWhiteSpace(account))
-        {
-            Application.MainLoop.Invoke(ShowLoginDialog);
-            return;
-        }
-
-        _activeAccountName = account;
-        RefreshSessionHeader();
-
-        switch (_activeConnection.AuthMethod.ToLowerInvariant())
-        {
-            case "token":
-                await SendMessageAsync("auth", new { method = "token", token = account });
-                AppendLogLine("Auth: token request sent.");
-                break;
-            case "creds":
-                if (string.IsNullOrWhiteSpace(_activeConnection.Password))
-                {
-                    AppendLogLine("Auth: credentials missing password.");
-                    break;
-                }
-                await SendMessageAsync("auth", new { method = "credentials", username = account, password = _activeConnection.Password });
-                AppendLogLine("Auth: credentials request sent.");
-                break;
-            default:
-                await SendMessageAsync("auth", new { method = "guest", guestName = account });
-                AppendLogLine("Auth: guest request sent.");
-                break;
-        }
+        Application.MainLoop.Invoke(ShowLoginDialog);
+        return Task.CompletedTask;
     }
 
     private void ShowSettingsDialog()
@@ -2016,7 +2462,7 @@ public sealed class MudClientApp : IDisposable
         var saveButton = new Button("Save");
         var cancelButton = new Button("Cancel");
         saveButton.IsDefault = true;
-        var dialog = new Dialog("Settings", 90, 24, saveButton, cancelButton);
+        var dialog = new Dialog("Settings", 90, 31, saveButton, cancelButton);
 
         var themeLabel = new Label("Theme:")
         {
@@ -2062,6 +2508,52 @@ public sealed class MudClientApp : IDisposable
             Y = 13,
             Width = 20
         };
+
+        var chatFgLabel = new Label("Chat fg:")
+        {
+            X = 1,
+            Y = 15
+        };
+        var chatFgField = new TextField(_config.ChatStyle.Foreground ?? string.Empty)
+        {
+            X = 12,
+            Y = 15,
+            Width = 20
+        };
+
+        var chatBgLabel = new Label("Chat bg:")
+        {
+            X = 1,
+            Y = 17
+        };
+        var chatBgField = new TextField(_config.ChatStyle.Background ?? string.Empty)
+        {
+            X = 12,
+            Y = 17,
+            Width = 20
+        };
+
+        var combatStyleLabel = new Label("Combat:")
+        {
+            X = 1,
+            Y = 19
+        };
+        var combatStyleGroup = new RadioGroup(12, 19, new[] { (ustring)"Compact", "Tagged", "Split" }, 0);
+
+        var combatFxCheck = new CheckBox(1, 22, "Combat fx", _config.CombatDisplay.ShowFx);
+        var combatImpactCheck = new CheckBox(1, 23, "Impact fx (self)", _config.CombatDisplay.ShowImpactFx);
+        var combatColorCheck = new CheckBox(1, 24, "Combat colors", _config.CombatDisplay.UseColorKeys);
+        var combatColorButton = new Button(20, 24, "Edit colors...");
+
+        var fontNote = new Label("Fonts are set in your terminal emulator.")
+        {
+            X = 1,
+            Y = 26,
+            Width = 32
+        };
+
+        var wrapLogCheck = new CheckBox(1, 27, "Wrap log", _config.WrapLogLines);
+        var devNoticeCheck = new CheckBox(1, 28, "Dev notices", _config.ShowDevNotices);
 
         var keybindFrame = new FrameView("Keybinds")
         {
@@ -2128,10 +2620,18 @@ public sealed class MudClientApp : IDisposable
 
         keybindFrame.Add(scopeLabel, scopeGroup, scopeNote, actionList, bindingLabel, bindingField, bindButton, bindHint, commandLabel, commandField);
 
-        dialog.Add(themeLabel, themeList, navStyleLabel, navStyleGroup, navFgLabel, navFgField, navBgLabel, navBgField, keybindFrame);
+        dialog.Add(themeLabel, themeList, navStyleLabel, navStyleGroup, navFgLabel, navFgField, navBgLabel, navBgField,
+            chatFgLabel, chatFgField, chatBgLabel, chatBgField, combatStyleLabel, combatStyleGroup, combatFxCheck,
+            combatImpactCheck, combatColorCheck, combatColorButton, fontNote, wrapLogCheck, devNoticeCheck, keybindFrame);
 
         var selectedThemeIndex = themes.FindIndex(name => string.Equals(name, _config.Theme, StringComparison.OrdinalIgnoreCase));
         themeList.SelectedItem = selectedThemeIndex < 0 ? 0 : selectedThemeIndex;
+        combatStyleGroup.SelectedItem = _config.CombatDisplay.Style?.Trim().ToLowerInvariant() switch
+        {
+            "tagged" => 1,
+            "split" => 2,
+            _ => 0
+        };
 
         KeybindScope GetSelectedScope() => scopeGroup.SelectedItem switch
         {
@@ -2279,6 +2779,13 @@ public sealed class MudClientApp : IDisposable
 
         RefreshActionSelection();
 
+        var workingCombatColorKeys = new Dictionary<string, string>(_config.CombatDisplay.ColorKeys, StringComparer.OrdinalIgnoreCase);
+
+        combatColorButton.Clicked += () =>
+        {
+            ShowCombatColorDialog(workingCombatColorKeys);
+        };
+
         saveButton.Clicked += () =>
         {
             CommitCurrentActionFields();
@@ -2288,8 +2795,26 @@ public sealed class MudClientApp : IDisposable
             _config.NavRingStyle = navStyleGroup.SelectedItem == 1 ? "grid" : "ring";
             _config.NavRingTheme.Foreground = GetFieldText(navFgField).Trim();
             _config.NavRingTheme.Background = GetFieldText(navBgField).Trim();
+            _config.ChatStyle.Foreground = GetFieldText(chatFgField).Trim();
+            _config.ChatStyle.Background = GetFieldText(chatBgField).Trim();
+            _config.CombatDisplay.Style = combatStyleGroup.SelectedItem switch
+            {
+                1 => "tagged",
+                2 => "split",
+                _ => "compact"
+            };
+            _config.CombatDisplay.ShowFx = combatFxCheck.Checked;
+            _config.CombatDisplay.ShowImpactFx = combatImpactCheck.Checked;
+            _config.CombatDisplay.UseColorKeys = combatColorCheck.Checked;
+            _config.CombatDisplay.ColorKeys = workingCombatColorKeys.Count == 0
+                ? new CombatDisplayConfig().ColorKeys
+                : new Dictionary<string, string>(workingCombatColorKeys, StringComparer.OrdinalIgnoreCase);
+            _config.WrapLogLines = wrapLogCheck.Checked;
+            _config.ShowDevNotices = devNoticeCheck.Checked;
             _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
             ApplyTheme(_config.Theme, logChange: true);
+            _router.UpdateCombatDisplay(_config.CombatDisplay);
+            UpdateLogWrapWidth();
 
             var scope = GetSelectedScope();
             if (!TrySaveKeybindScope(scope, GetWorkingBindings(scope), GetWorkingCommands(scope)))
@@ -2300,6 +2825,103 @@ public sealed class MudClientApp : IDisposable
             SaveAppearanceToActiveProfile();
             SaveConfig();
             RefreshKeyBindings();
+            Application.RequestStop();
+        };
+
+        cancelButton.Clicked += () => Application.RequestStop();
+
+        Application.Run(dialog);
+    }
+
+    private static void ShowCombatColorDialog(Dictionary<string, string> colorKeys)
+    {
+        var saveButton = new Button("Save");
+        var cancelButton = new Button("Cancel");
+        saveButton.IsDefault = true;
+
+        var dialog = new Dialog("Combat Colors", 60, 20, saveButton, cancelButton);
+        var keys = colorKeys.Keys.OrderBy(key => key, StringComparer.OrdinalIgnoreCase).ToList();
+
+        var keyList = new ListView(keys)
+        {
+            X = 1,
+            Y = 1,
+            Width = 26,
+            Height = 12
+        };
+
+        var colorLabel = new Label("Color:")
+        {
+            X = 30,
+            Y = 1
+        };
+        var colorField = new TextField(string.Empty)
+        {
+            X = 30,
+            Y = 2,
+            Width = 20
+        };
+
+        var hintLabel = new Label("Use named colors (brightyellow, gray).")
+        {
+            X = 30,
+            Y = 4,
+            Width = 28
+        };
+
+        dialog.Add(keyList, colorLabel, colorField, hintLabel);
+
+        string? currentKey = null;
+
+        void CommitCurrent()
+        {
+            if (string.IsNullOrWhiteSpace(currentKey))
+            {
+                return;
+            }
+
+            var value = GetFieldText(colorField).Trim();
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                colorKeys.Remove(currentKey);
+            }
+            else
+            {
+                colorKeys[currentKey] = value;
+            }
+        }
+
+        void LoadKey(string key)
+        {
+            if (colorKeys.TryGetValue(key, out var value))
+            {
+                colorField.Text = value;
+            }
+            else
+            {
+                colorField.Text = string.Empty;
+            }
+            currentKey = key;
+        }
+
+        keyList.SelectedItemChanged += _ =>
+        {
+            CommitCurrent();
+            if (keyList.SelectedItem >= 0 && keyList.SelectedItem < keys.Count)
+            {
+                LoadKey(keys[keyList.SelectedItem]);
+            }
+        };
+
+        if (keys.Count > 0)
+        {
+            keyList.SelectedItem = 0;
+            LoadKey(keys[0]);
+        }
+
+        saveButton.Clicked += () =>
+        {
+            CommitCurrent();
             Application.RequestStop();
         };
 
@@ -2446,7 +3068,7 @@ public sealed class MudClientApp : IDisposable
 
     private void LogOutgoing(string eventName, object payload)
     {
-        if (!_config.ShowDiagnosticInfo)
+        if (!_config.ShowDevNotices)
         {
             return;
         }
@@ -2466,7 +3088,7 @@ public sealed class MudClientApp : IDisposable
 
     private void LogOutgoingJson(string eventName, string payloadJson)
     {
-        if (!_config.ShowDiagnosticInfo)
+        if (!_config.ShowDevNotices)
         {
             return;
         }
@@ -2481,7 +3103,7 @@ public sealed class MudClientApp : IDisposable
             return true;
         }
 
-        if (_config.ShowDiagnosticInfo)
+        if (_config.ShowDevNotices)
         {
             AppendLogLine("Send skipped: socket not connected.");
         }
@@ -2497,19 +3119,36 @@ public sealed class MudClientApp : IDisposable
             return;
         }
 
-        if (movement.Compass != null)
+        var tokens = new List<string>();
+        if (!string.IsNullOrWhiteSpace(movement.Target))
         {
-            await SendSlashCommandAsync($"/move compass:{movement.Compass} speed:{movement.Speed}");
+            tokens.Add(movement.Target);
+        }
+        else if (movement.Compass != null)
+        {
+            tokens.Add(movement.Compass.ToLowerInvariant());
+        }
+        else if (movement.Heading.HasValue)
+        {
+            tokens.Add($"heading:{movement.Heading.Value}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(movement.Speed))
+        {
+            tokens.Add(movement.Speed.ToLowerInvariant());
+        }
+
+        if (!string.IsNullOrWhiteSpace(movement.Distance))
+        {
+            tokens.Add(movement.Distance.ToLowerInvariant());
+        }
+
+        if (tokens.Count == 0)
+        {
             return;
         }
 
-        if (movement.Heading.HasValue)
-        {
-            await SendSlashCommandAsync($"/move heading:{movement.Heading.Value} speed:{movement.Speed}");
-            return;
-        }
-
-        await SendSlashCommandAsync($"/move speed:{movement.Speed}");
+        await SendSlashCommandAsync($"/move {string.Join(' ', tokens)}");
     }
 
     private MovementParseResult TryParseMovementCommand(string text, out MovementCommand movement, out string? error)
@@ -2523,54 +3162,199 @@ public sealed class MudClientApp : IDisposable
         }
 
         var trimmed = text.Trim();
-        var separatorIndex = trimmed.IndexOf('.');
-        if (separatorIndex < 0)
+        if (string.Equals(trimmed, "stop", StringComparison.OrdinalIgnoreCase))
         {
-            separatorIndex = trimmed.IndexOf(' ');
+            movement = new MovementCommand("stop", null, null, null, null);
+            return MovementParseResult.Parsed;
         }
 
-        var speedToken = separatorIndex >= 0 ? trimmed[..separatorIndex] : trimmed;
-        var directionToken = separatorIndex >= 0 ? trimmed[(separatorIndex + 1)..].Trim() : string.Empty;
-
-        if (string.IsNullOrWhiteSpace(speedToken))
+        var tokens = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (tokens.Length == 0)
         {
             return MovementParseResult.NotMovement;
         }
 
-        var speed = speedToken.ToLowerInvariant();
-        if (speed is not ("walk" or "jog" or "run" or "stop"))
+        string? speed = null;
+        int? heading = null;
+        string? compass = null;
+        string? distance = null;
+        string? target = null;
+        var startIndex = 0;
+
+        if (tokens[0].Contains('.'))
+        {
+            var dotToken = tokens[0];
+            var separatorIndex = dotToken.IndexOf('.');
+            if (separatorIndex > 0)
+            {
+                var speedToken = dotToken[..separatorIndex].Trim();
+                if (TryParseSpeedToken(speedToken, out var parsedSpeed))
+                {
+                    speed = parsedSpeed;
+                    var directionToken = dotToken[(separatorIndex + 1)..].Trim();
+                    if (!string.IsNullOrWhiteSpace(directionToken))
+                    {
+                        if (TryParseHeading(directionToken, out var dotHeading))
+                        {
+                            heading = dotHeading;
+                        }
+                        else if (TryParseCompass(directionToken, out var dotCompass))
+                        {
+                            compass = dotCompass;
+                        }
+                        else
+                        {
+                            error = $"Invalid movement direction: {directionToken}";
+                            return MovementParseResult.Invalid;
+                        }
+                    }
+                    startIndex = 1;
+                }
+            }
+        }
+
+        if (startIndex == 0 && tokens.Length == 1 && TryParseCompass(tokens[0], out var singleCompass))
+        {
+            movement = new MovementCommand(null, null, singleCompass, null, null);
+            return MovementParseResult.Parsed;
+        }
+
+        for (var i = startIndex; i < tokens.Length; i++)
+        {
+            var token = tokens[i];
+
+            if (string.Equals(token, "stop", StringComparison.OrdinalIgnoreCase))
+            {
+                error = "Stop cannot be combined with other movement tokens.";
+                return MovementParseResult.Invalid;
+            }
+
+            if (TryParseSpeedToken(token, out var parsedSpeed))
+            {
+                if (speed != null)
+                {
+                    error = "Only one movement speed is allowed.";
+                    return MovementParseResult.Invalid;
+                }
+
+                speed = parsedSpeed;
+                continue;
+            }
+
+            if (token.StartsWith("to:", StringComparison.OrdinalIgnoreCase))
+            {
+                if (target != null)
+                {
+                    error = "Only one movement target is allowed.";
+                    return MovementParseResult.Invalid;
+                }
+
+                target = token;
+                continue;
+            }
+
+            if (token.StartsWith("heading:", StringComparison.OrdinalIgnoreCase))
+            {
+                if (heading.HasValue)
+                {
+                    error = "Only one heading is allowed.";
+                    return MovementParseResult.Invalid;
+                }
+
+                var headingToken = token["heading:".Length..];
+                if (!TryParseHeading(headingToken, out var parsedHeading))
+                {
+                    error = $"Invalid movement heading: {headingToken}";
+                    return MovementParseResult.Invalid;
+                }
+
+                heading = parsedHeading;
+                continue;
+            }
+
+            if (TryParseCompass(token, out var parsedCompass))
+            {
+                if (compass != null || heading.HasValue || target != null)
+                {
+                    error = "Only one movement direction is allowed.";
+                    return MovementParseResult.Invalid;
+                }
+
+                compass = parsedCompass;
+                continue;
+            }
+
+            if (speed != null && compass == null && !heading.HasValue && target == null && TryParseHeading(token, out var parsedHeadingToken))
+            {
+                heading = parsedHeadingToken;
+                continue;
+            }
+
+            if (TryParseDistanceToken(token, out var parsedDistance))
+            {
+                if (distance != null)
+                {
+                    error = "Only one movement distance is allowed.";
+                    return MovementParseResult.Invalid;
+                }
+
+                distance = parsedDistance;
+                continue;
+            }
+
+            return MovementParseResult.NotMovement;
+        }
+
+        if (speed == null && compass == null && !heading.HasValue && target == null)
         {
             return MovementParseResult.NotMovement;
         }
 
-        if (speed == "stop")
-        {
-            movement = new MovementCommand(speed, null, null);
-            return MovementParseResult.Parsed;
-        }
-
-        if (string.IsNullOrWhiteSpace(directionToken))
-        {
-            movement = new MovementCommand(speed, null, null);
-            return MovementParseResult.Parsed;
-        }
-
-        if (TryParseHeading(directionToken, out var heading))
-        {
-            movement = new MovementCommand(speed, heading, null);
-            return MovementParseResult.Parsed;
-        }
-
-        if (TryParseCompass(directionToken, out var compass))
-        {
-            movement = new MovementCommand(speed, null, compass);
-            return MovementParseResult.Parsed;
-        }
-
-        error = $"Invalid movement direction: {directionToken}";
-        return MovementParseResult.Invalid;
+        movement = new MovementCommand(speed, heading, compass, distance, target);
+        return MovementParseResult.Parsed;
     }
 
+    private static bool TryParseSpeedToken(string token, out string speed)
+    {
+        speed = token.Trim().ToLowerInvariant();
+        return speed is "walk" or "jog" or "run";
+    }
+
+    private static bool TryParseDistanceToken(string token, out string distance)
+    {
+        distance = token.Trim();
+        if (string.IsNullOrWhiteSpace(distance))
+        {
+            return false;
+        }
+
+        var normalized = distance.ToLowerInvariant();
+        var unit = string.Empty;
+        var numberPart = normalized;
+
+        if (normalized.EndsWith("ft", StringComparison.Ordinal))
+        {
+            unit = "ft";
+            numberPart = normalized[..^2];
+        }
+        else if (normalized.EndsWith("m", StringComparison.Ordinal))
+        {
+            unit = "m";
+            numberPart = normalized[..^1];
+        }
+
+        if (!double.TryParse(numberPart, NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(unit))
+        {
+            distance = numberPart + unit;
+        }
+
+        return true;
+    }
     private static bool TryParseHeading(string token, out int heading)
     {
         heading = 0;
@@ -2622,6 +3406,23 @@ public sealed class MudClientApp : IDisposable
         return dirs[Math.Clamp(index, 0, dirs.Length - 1)];
     }
 
+    private static string FormatCommandValue(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return value;
+        }
+
+        var needsQuotes = value.Any(char.IsWhiteSpace) || value.Contains('"');
+        if (!needsQuotes)
+        {
+            return value;
+        }
+
+        var escaped = value.Replace("\"", "\\\"");
+        return $"\"{escaped}\"";
+    }
+
     private enum MovementParseResult
     {
         NotMovement,
@@ -2629,7 +3430,7 @@ public sealed class MudClientApp : IDisposable
         Invalid
     }
 
-    private readonly record struct MovementCommand(string Speed, int? Heading, string? Compass);
+    private readonly record struct MovementCommand(string? Speed, int? Heading, string? Compass, string? Distance, string? Target);
     private readonly record struct NearbyEntityInfo(
         string Id,
         string Name,
@@ -2661,10 +3462,14 @@ public sealed class MudClientApp : IDisposable
         _config.NavRingStyle = updated.NavRingStyle;
         _config.NavRingTheme = updated.NavRingTheme;
         _config.CustomTheme = updated.CustomTheme;
+        _config.ChatStyle = updated.ChatStyle;
+        _config.CombatDisplay = updated.CombatDisplay;
         _config.PositionCommandTemplate = updated.PositionCommandTemplate;
         _config.RangeBands = updated.RangeBands;
         _config.Macros = updated.Macros;
         _config.ShowDiagnosticInfo = updated.ShowDiagnosticInfo;
+        _config.ShowDevNotices = updated.ShowDevNotices;
+        _config.WrapLogLines = updated.WrapLogLines;
         _config.KeyBindings = updated.KeyBindings ?? KeybindSettings.CreateDefaults();
 
         _sendMode = SocketMessageModeParser.Parse(_config.SendMode, SocketMessageMode.Event);
@@ -2674,6 +3479,7 @@ public sealed class MudClientApp : IDisposable
         _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
         _defaultAppearance = BuildAppearanceFromConfig(_config);
         ApplyTheme(_config.Theme, logChange: true);
+        _router.UpdateCombatDisplay(_config.CombatDisplay);
         RefreshKeyBindings();
         AppendLogLine("Config reloaded.");
     }
@@ -2925,16 +3731,18 @@ public sealed class MudClientApp : IDisposable
         _statusBar.ColorScheme = scheme;
         _window.ColorScheme = scheme;
         _logView.ColorScheme = scheme;
-        _logSource.UpdatePalette(scheme);
+        _logSource.UpdatePalette(scheme, _config.ChatStyle);
         _inputField.ColorScheme = scheme;
         _navigationFrame.ColorScheme = scheme;
+        _partyFrame.ColorScheme = scheme;
+        _partyListView.ColorScheme = scheme;
+        _compassView.ColorScheme = scheme;
         _ringView.ColorScheme = ringScheme;
         _statusLabel.ColorScheme = scheme;
         _targetLabel.ColorScheme = scheme;
         _movementLabel.ColorScheme = scheme;
-        _navPositionLabel.ColorScheme = scheme;
-        _navHeadingLabel.ColorScheme = scheme;
-        _ringInfoLabel.ColorScheme = scheme;
+        _combatLabel.ColorScheme = scheme;
+        _vitalsLabel.ColorScheme = scheme;
         _rosterFrame.ColorScheme = scheme;
         _entityListView.ColorScheme = scheme;
             _approachButton.ColorScheme = scheme;
@@ -3088,6 +3896,8 @@ public sealed class MudClientApp : IDisposable
         {
             Theme = config.Theme,
             CustomTheme = CloneThemeConfig(config.CustomTheme),
+            ChatStyle = CloneChatStyleConfig(config.ChatStyle),
+            CombatDisplay = CloneCombatDisplayConfig(config.CombatDisplay),
             NavRingStyle = config.NavRingStyle,
             NavRingTheme = CloneNavRingTheme(config.NavRingTheme)
         };
@@ -3111,6 +3921,20 @@ public sealed class MudClientApp : IDisposable
         };
     }
 
+    private static ChatStyleConfig CloneChatStyleConfig(ChatStyleConfig? source)
+    {
+        if (source == null)
+        {
+            return new ChatStyleConfig();
+        }
+
+        return new ChatStyleConfig
+        {
+            Foreground = source.Foreground,
+            Background = source.Background
+        };
+    }
+
     private static NavRingThemeConfig CloneNavRingTheme(NavRingThemeConfig? source)
     {
         if (source == null)
@@ -3125,12 +3949,33 @@ public sealed class MudClientApp : IDisposable
         };
     }
 
+    private static CombatDisplayConfig CloneCombatDisplayConfig(CombatDisplayConfig? source)
+    {
+        if (source == null)
+        {
+            return new CombatDisplayConfig();
+        }
+
+        return new CombatDisplayConfig
+        {
+            Style = source.Style,
+            ShowFx = source.ShowFx,
+            ShowImpactFx = source.ShowImpactFx,
+            UseColorKeys = source.UseColorKeys,
+            ColorKeys = source.ColorKeys == null
+                ? new CombatDisplayConfig().ColorKeys
+                : new Dictionary<string, string>(source.ColorKeys, StringComparer.OrdinalIgnoreCase)
+        };
+    }
+
     private AppearanceSettings CaptureCurrentAppearance()
     {
         return new AppearanceSettings
         {
             Theme = _config.Theme,
             CustomTheme = CloneThemeConfig(_config.CustomTheme),
+            ChatStyle = CloneChatStyleConfig(_config.ChatStyle),
+            CombatDisplay = CloneCombatDisplayConfig(_config.CombatDisplay),
             NavRingStyle = _config.NavRingStyle,
             NavRingTheme = CloneNavRingTheme(_config.NavRingTheme)
         };
@@ -3142,6 +3987,7 @@ public sealed class MudClientApp : IDisposable
         {
             Theme = _defaultAppearance.Theme,
             CustomTheme = CloneThemeConfig(_defaultAppearance.CustomTheme),
+            CombatDisplay = CloneCombatDisplayConfig(_defaultAppearance.CombatDisplay),
             NavRingStyle = _defaultAppearance.NavRingStyle,
             NavRingTheme = CloneNavRingTheme(_defaultAppearance.NavRingTheme)
         };
@@ -3178,6 +4024,16 @@ public sealed class MudClientApp : IDisposable
             target.CustomTheme = CloneThemeConfig(overrides.CustomTheme);
         }
 
+        if (overrides.ChatStyle != null)
+        {
+            target.ChatStyle = CloneChatStyleConfig(overrides.ChatStyle);
+        }
+
+        if (overrides.CombatDisplay != null)
+        {
+            target.CombatDisplay = CloneCombatDisplayConfig(overrides.CombatDisplay);
+        }
+
         if (!string.IsNullOrWhiteSpace(overrides.NavRingStyle))
         {
             target.NavRingStyle = overrides.NavRingStyle;
@@ -3201,6 +4057,16 @@ public sealed class MudClientApp : IDisposable
             _config.CustomTheme = CloneThemeConfig(settings.CustomTheme);
         }
 
+        if (settings.ChatStyle != null)
+        {
+            _config.ChatStyle = CloneChatStyleConfig(settings.ChatStyle);
+        }
+
+        if (settings.CombatDisplay != null)
+        {
+            _config.CombatDisplay = CloneCombatDisplayConfig(settings.CombatDisplay);
+        }
+
         if (!string.IsNullOrWhiteSpace(settings.NavRingStyle))
         {
             _config.NavRingStyle = settings.NavRingStyle;
@@ -3213,6 +4079,7 @@ public sealed class MudClientApp : IDisposable
 
         _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
         ApplyTheme(_config.Theme, logChange: false);
+        _router.UpdateCombatDisplay(_config.CombatDisplay);
         SaveConfig();
         RefreshKeyBindings();
     }

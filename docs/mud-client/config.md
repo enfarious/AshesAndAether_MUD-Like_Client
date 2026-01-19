@@ -13,14 +13,20 @@ The client reads a JSON config at startup. Default path:
 - `protocolVersion`: Protocol version sent in the handshake.
 - `clientVersion`: Client version string.
 - `maxUpdateRate`: Max updates per second this client can handle.
-- `showDiagnosticInfo`: When true, the log keeps handshake/auth/state diagnostics and echoes outgoing events so you can confirm what the client is sending; set it to `false` for a purer chat/movement feed.
+- `autoLogin`: When true, the client will send auth automatically after connecting.
+- `showDiagnosticInfo`: When true, the log keeps handshake/auth/state diagnostics and includes raw unknown events.
+- `showDevNotices`: When true, show dev-only acknowledgements and raw outbound logs.
 - `autoConnect`: If true, connect on startup (default: true).
 - `defaultCommandType`: Message type used for typed commands (default: `command`).
+  When set to `command`, the client wraps non-slash input as `/say`.
 - `theme`: Theme name (`ember`, `dusk`, `terminal`, `parchment`, or `custom`).
 - `customTheme`: Optional color overrides used when `theme` is `custom`.
+- `chatStyle`: Optional chat log overrides (foreground/background). Fonts and text styles come from the terminal emulator.
+- `combatDisplay`: Optional combat log display preferences.
 - `positionCommandTemplate`: Template for ring intents.
 - `rangeBands`: List of range bands for the ring widget.
 - `macros`: Array of macro buttons `{ label, command }`.
+- `wrapLogLines`: When true, the main log word-wraps to the available width.
 
 ## Template Tokens
 
@@ -71,3 +77,28 @@ Allowed color names:
 `black`, `blue`, `green`, `cyan`, `red`, `magenta`, `brown`, `gray`, `darkgray`,
 `brightblue`, `brightgreen`, `brightcyan`, `brightred`, `brightmagenta`,
 `brightyellow`, `white`
+
+## Chat Style
+
+Optional overrides for chat lines (falls back to the active theme if blank).
+
+- `foreground`
+- `background`
+
+Uses the same color names listed in Theme Colors.
+
+## Combat Display
+
+Optional overrides for combat log formatting.
+
+- `style`: `compact`, `tagged`, or `split`.
+  - `compact`: one-line combat entries with optional FX suffixes.
+  - `tagged`: adds `[CRIT][PEN]`-style tags for colorblind-friendly scanning.
+  - `split`: main line + separate FX/impact lines.
+- `showFx`: When true, include dev-only floatText details.
+- `showImpactFx`: When true, include target floatText details when you are hit.
+- `useColorKeys`: When true, apply color keys from combat events to the log output.
+- `colorKeys`: Mapping of server color keys (ex: `player.color.hit`) to terminal color names.
+
+Color values use the same named colors as Theme Colors.
+You can edit combat color keys in the Settings dialog.
