@@ -50,4 +50,5 @@ Server aliases expected:
 
 - Global config: `clients/mud/config.json`.
 - Connection/character-specific overrides saved in `clients/mud/connections.json`.
+- Connection overrides can set auto-login on/off per connection.
 - Keybinds live in settings, with optional overrides per connection/character.

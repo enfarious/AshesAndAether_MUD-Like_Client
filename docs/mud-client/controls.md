@@ -8,6 +8,7 @@
 - `F5`: Connect
 - `F6`: Disconnect
 - `F10`: Quit
+- `/` or `Space`: Focus the input bar when the main window is active
 
 ## Input
 
@@ -30,3 +31,15 @@ Bindings send macro commands (e.g., `/cast ability1`, `/use item1`, `/companion 
 - `Enter` or `Space`: Confirm selection
 
 The command emitted uses `positionCommandTemplate` from `config.json`.
+
+## Movement Grid
+
+```
+Q W E
+A S D
+Z X C
+```
+
+- `Q/W/E/A/D/Z/X/C`: Walk NW/N/NE/W/E/SW/S/SE.
+- Double-tap: jog. Triple-tap: run.
+- `S`: Stop.

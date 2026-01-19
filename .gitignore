@@ -85,3 +85,4 @@ AGENTS.md
 /.codex
 /.agents
 WodMudClient (Beta).exe.lnk
+clients/mud/connections.json

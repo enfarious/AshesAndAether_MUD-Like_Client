@@ -2,7 +2,8 @@
 
 Commands are prefixed with `/`. Slash commands are forwarded to the server as
 typed (including the leading `/`), except for client-only diagnostics. Anything
-else is sent as a text command using `defaultCommandType`.
+else is treated as `/say` when `defaultCommandType` is `command`; otherwise the
+text is sent using `defaultCommandType`.
 
 ## Utilities
 Client utilities live in the menu bar or hotkeys (F1/F3/F5/F6/F10, etc.).
