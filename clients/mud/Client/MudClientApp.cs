@@ -7,7 +7,7 @@ using System.Text.Json;
 using NStack;
 using Terminal.Gui;
 
-namespace WodMudClient;
+namespace AshesAndAether_Client;
 
 public sealed class MudClientApp : IDisposable
 {
@@ -321,7 +321,8 @@ public sealed class MudClientApp : IDisposable
             Y = 0,
             Width = Dim.Fill(),
             Height = 8,
-            CanFocus = true
+            CanFocus = true,
+            WantMousePositionReports = true
         };
 
         _compassView.DirectionSelected += OnCompassDirectionSelected;
@@ -1062,8 +1063,22 @@ public sealed class MudClientApp : IDisposable
             return;
         }
 
-        var payload = new { text };
-        await SendMessageAsync(_config.DefaultCommandType, payload);
+        if (string.IsNullOrWhiteSpace(_config.DefaultCommandType) ||
+            string.Equals(_config.DefaultCommandType, "chat", StringComparison.OrdinalIgnoreCase))
+        {
+            var payload = new
+            {
+                channel = "say",
+                message = text,
+                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            };
+            await SendMessageAsync("chat", payload);
+            AppendLogLine($"> {text}");
+            return;
+        }
+
+        var fallbackPayload = new { text };
+        await SendMessageAsync(_config.DefaultCommandType, fallbackPayload);
         AppendLogLine($"> {text}");
     }
 
@@ -1613,7 +1628,7 @@ public sealed class MudClientApp : IDisposable
 
         if (approach)
         {
-            var token = FormatCommandValue(GetEntityCommandToken(entity.Value));
+            var token = FormatCommandValue(GetEntityMoveToken(entity.Value));
             var approachSpeed = "walk";
             await SendSlashCommandAsync($"/move to:{token} range:melee {approachSpeed}");
             AppendLogLine($"Approaching {GetEntityDisplayName(entity.Value)} (melee range).");
@@ -1642,7 +1657,7 @@ public sealed class MudClientApp : IDisposable
             return;
         }
 
-        var token = GetEntityCommandToken(entity.Value);
+        var token = FormatCommandValue(GetEntityCommandToken(entity.Value));
         _ = SendSlashCommandAsync($"{command} {token}".Trim());
         AppendLogLine($"> {command} {token}".Trim());
     }
@@ -1691,12 +1706,27 @@ public sealed class MudClientApp : IDisposable
 
     private string GetEntityCommandToken(NearbyEntityInfo entity)
     {
+        if (!string.IsNullOrWhiteSpace(entity.Id))
+        {
+            return entity.Id;
+        }
+
         if (!string.IsNullOrWhiteSpace(entity.Name))
         {
             return entity.Name;
         }
 
         return entity.Id;
+    }
+
+    private static string GetEntityMoveToken(NearbyEntityInfo entity)
+    {
+        if (!string.IsNullOrWhiteSpace(entity.Id))
+        {
+            return entity.Id;
+        }
+
+        return entity.Name;
     }
 
     private int? DetermineHeadingForEntity(NearbyEntityInfo entity, bool approach)
@@ -1915,6 +1945,7 @@ public sealed class MudClientApp : IDisposable
         AppendLogLine("Slash commands are forwarded to the server.");
         AppendLogLine("Use the menu or function keys for connect/login/theme/reload/quit actions.");
         AppendLogLine("Client-only: /client roster (or /roster) dumps the proximity roster cache.");
+        AppendLogLine("Client-only: /client refresh requests a proximity roster refresh.");
         AppendLogLine("Use macros for quick actions. Use the ring to send position intents relative to the current target.");
     }
 
@@ -3115,40 +3146,78 @@ public sealed class MudClientApp : IDisposable
     {
         if (string.Equals(movement.Speed, "stop", StringComparison.OrdinalIgnoreCase))
         {
-            await SendSlashCommandAsync("/stop");
+            var payload = new
+            {
+                method = "heading",
+                speed = "stop",
+                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            };
+            await SendMessageAsync("move", payload);
             return;
         }
 
-        var tokens = new List<string>();
-        if (!string.IsNullOrWhiteSpace(movement.Target))
+        var hasTarget = !string.IsNullOrWhiteSpace(movement.Target);
+        var hasDistance = !string.IsNullOrWhiteSpace(movement.Distance);
+        if (hasTarget || hasDistance)
         {
-            tokens.Add(movement.Target);
-        }
-        else if (movement.Compass != null)
-        {
-            tokens.Add(movement.Compass.ToLowerInvariant());
-        }
-        else if (movement.Heading.HasValue)
-        {
-            tokens.Add($"heading:{movement.Heading.Value}");
-        }
+            var tokens = new List<string>();
+            if (hasTarget)
+            {
+                tokens.Add(movement.Target!);
+            }
+            else if (movement.Compass != null)
+            {
+                tokens.Add(movement.Compass.ToLowerInvariant());
+            }
+            else if (movement.Heading.HasValue)
+            {
+                tokens.Add($"heading:{movement.Heading.Value}");
+            }
 
-        if (!string.IsNullOrWhiteSpace(movement.Speed))
-        {
-            tokens.Add(movement.Speed.ToLowerInvariant());
-        }
+            if (!string.IsNullOrWhiteSpace(movement.Speed))
+            {
+                tokens.Add(movement.Speed.ToLowerInvariant());
+            }
 
-        if (!string.IsNullOrWhiteSpace(movement.Distance))
-        {
-            tokens.Add(movement.Distance.ToLowerInvariant());
-        }
+            if (!string.IsNullOrWhiteSpace(movement.Distance))
+            {
+                tokens.Add(movement.Distance.ToLowerInvariant());
+            }
 
-        if (tokens.Count == 0)
-        {
+            if (tokens.Count == 0)
+            {
+                return;
+            }
+
+            await SendSlashCommandAsync($"/move {string.Join(' ', tokens)}");
             return;
         }
 
-        await SendSlashCommandAsync($"/move {string.Join(' ', tokens)}");
+        var speed = string.IsNullOrWhiteSpace(movement.Speed) ? "walk" : NormalizeSpeed(movement.Speed);
+        if (movement.Compass != null)
+        {
+            var payload = new
+            {
+                method = "compass",
+                compass = movement.Compass.ToUpperInvariant(),
+                speed,
+                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            };
+            await SendMessageAsync("move", payload);
+            return;
+        }
+
+        if (movement.Heading.HasValue)
+        {
+            var payload = new
+            {
+                method = "heading",
+                heading = movement.Heading.Value,
+                speed,
+                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            };
+            await SendMessageAsync("move", payload);
+        }
     }
 
     private MovementParseResult TryParseMovementCommand(string text, out MovementCommand movement, out string? error)
@@ -3555,6 +3624,10 @@ public sealed class MudClientApp : IDisposable
                 break;
             case "roster":
                 DumpProximityRoster();
+                break;
+            case "refresh":
+                _ = SendMessageAsync("proximity_refresh", new { timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
+                AppendLogLine("Requested proximity roster refresh.");
                 break;
             case "raw":
                 if (parts.Length < 2)

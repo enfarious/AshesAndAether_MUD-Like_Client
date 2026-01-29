@@ -17,8 +17,9 @@ The client reads a JSON config at startup. Default path:
 - `showDiagnosticInfo`: When true, the log keeps handshake/auth/state diagnostics and includes raw unknown events.
 - `showDevNotices`: When true, show dev-only acknowledgements and raw outbound logs.
 - `autoConnect`: If true, connect on startup (default: true).
-- `defaultCommandType`: Message type used for typed commands (default: `command`).
-  When set to `command`, the client wraps non-slash input as `/say`.
+- `defaultCommandType`: Message type used for typed commands (default: `chat`).
+  When set to `chat`, non-slash input sends a chat payload on the `say` channel.
+  When set to `command`, the client wraps non-slash input as `/say` (legacy).
 - `theme`: Theme name (`ember`, `dusk`, `terminal`, `parchment`, or `custom`).
 - `customTheme`: Optional color overrides used when `theme` is `custom`.
 - `chatStyle`: Optional chat log overrides (foreground/background). Fonts and text styles come from the terminal emulator.
@@ -40,8 +41,8 @@ Text input is sent as:
 
 ```json
 {
-  "type": "<defaultCommandType>",
-  "payload": { "text": "north" }
+  "type": "chat",
+  "payload": { "channel": "say", "message": "north", "timestamp": 1234567890 }
 }
 ```
 

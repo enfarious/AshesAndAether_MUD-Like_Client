@@ -1,4 +1,4 @@
-namespace WodMudClient;
+namespace AshesAndAether_Client;
 
 public readonly record struct Vector3(double X, double Y, double Z)
 {

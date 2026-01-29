@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using Terminal.Gui;
 
-namespace WodMudClient;
+namespace AshesAndAether_Client;
 
 public sealed class PositionRingView : View
 {

@@ -10,15 +10,17 @@ Socket.io protocol and forwards most slash commands directly to the server.
 - Connect/login flows (guest/token/creds) and character select/create.
 - World entry rendering with zone description, exits, and nearby entities.
 - Movement ring for directional commands and range bands.
-- Proximity roster cache with full roster + delta updates.
+- Proximity roster cache with delta-only updates.
 - Nearby entity list with engage toggle; engaged entities float to the top and
   remain selected across refreshes.
-- Client diagnostics: `/client roster` or `/roster`.
+- Client diagnostics: `/client roster` or `/roster`, plus `/client refresh`.
 
 ## Input & Keybinds
 
 - Global key routing focuses the input field for `/`, letters, and space (when
   the main window has focus).
+- Non-slash text sends a `chat` message on the `say` channel.
+- Slash commands are sent via the `command` event.
 - Keybinds are configurable in Settings, with press-to-bind and Esc to cancel.
 - Scope precedence: global, then connection overrides, then character overrides.
 - Bindings and commands inherit unless explicitly set; use `none` to disable.
@@ -41,7 +43,7 @@ Server aliases expected:
 
 ## Proximity Roster
 
-- Handles `proximity_roster` and `proximity_roster_delta`.
+- Handles `proximity_roster_delta` (delta-only; start from empty roster).
 - Deltas update the cached roster; samples and lastSpeaker clear properly when
   omitted or null in payloads.
 - The roster cache is used for navigation targeting and list display.

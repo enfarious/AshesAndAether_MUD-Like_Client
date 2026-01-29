@@ -1,4 +1,4 @@
-namespace WodMudClient;
+namespace AshesAndAether_Client;
 
 public sealed record LogLine(string Text, string? ColorKey = null, double? Shake = null)
 {

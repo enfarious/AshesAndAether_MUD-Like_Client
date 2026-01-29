@@ -1,4 +1,4 @@
-using WodMudClient;
+using AshesAndAether_Client;
 
 var configPath = args.Length > 0
     ? args[0]

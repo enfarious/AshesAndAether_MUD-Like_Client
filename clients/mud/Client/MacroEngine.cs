@@ -1,4 +1,4 @@
-namespace WodMudClient;
+namespace AshesAndAether_Client;
 
 public sealed class MacroEngine
 {

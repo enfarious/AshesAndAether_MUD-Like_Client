@@ -9,7 +9,7 @@
   "maxUpdateRate": 1,
   "autoLogin": false,
   "autoConnect": false,
-  "defaultCommandType": "command",
+  "defaultCommandType": "chat",
   "theme": "ember",
   "navRingStyle": "ring",
   "navRingTheme": {

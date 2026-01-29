@@ -1,7 +1,7 @@
 using Terminal.Gui;
 using Attribute = Terminal.Gui.Attribute;
 
-namespace WodMudClient;
+namespace AshesAndAether_Client;
 
 public sealed class ThemeManager
 {

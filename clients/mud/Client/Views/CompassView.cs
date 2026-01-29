@@ -4,17 +4,17 @@ using System.Linq;
 using System.Text;
 using Terminal.Gui;
 
-namespace WodMudClient;
+namespace AshesAndAether_Client;
 
 public sealed class CompassView : View
 {
     private static readonly string[] Lines =
     {
-        "    N",
-        "NW  |  NE",
+        "       N       ",
+        "   NW  |  NE   ",
         "W -----+----- E",
-        "SW  |  SE",
-        "    S",
+        "   SW  |  SE   ",
+        "       S       ",
         "",
         "Stop Walk Jog Run",
         "          ^"

@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace WodMudClient;
+namespace AshesAndAether_Client;
 
 public sealed class OutgoingMessage
 {

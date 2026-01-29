@@ -2,7 +2,7 @@ using System.Text.Json;
 using SocketIOClient;
 using SocketIOClient.Transport;
 
-namespace WodMudClient;
+namespace AshesAndAether_Client;
 
 public sealed class SocketIoTransport : IDisposable
 {

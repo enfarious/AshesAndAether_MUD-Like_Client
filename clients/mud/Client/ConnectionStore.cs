@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace WodMudClient;
+namespace AshesAndAether_Client;
 
 public sealed class ConnectionStore
 {
