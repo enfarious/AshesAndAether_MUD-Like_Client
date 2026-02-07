@@ -118,12 +118,11 @@ internal sealed class LogListSource : IListDataSource
             col = 0;
         }
 
-        var offset = col <= 2 ? 0 : col;
-        if (offset > 0 && offset < text.Length)
+        if (col > 0 && col < text.Length)
         {
-            text = text.Substring(offset);
+            text = text.Substring(col);
         }
-        else if (offset >= text.Length)
+        else if (col >= text.Length)
         {
             text = string.Empty;
         }
@@ -137,7 +136,7 @@ internal sealed class LogListSource : IListDataSource
             text = text.PadRight(width);
         }
 
-        driver.Move(0, line);
+        listView.Move(0, line);
         var scheme = listView.ColorScheme ?? Colors.Base;
         var attribute = marked ? scheme.Focus : GetAttribute(entry.Kind);
         if (entry.ForegroundOverride.HasValue || entry.BackgroundOverride.HasValue)

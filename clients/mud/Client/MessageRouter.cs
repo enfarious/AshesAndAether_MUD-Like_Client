@@ -1207,16 +1207,26 @@ public sealed class MessageRouter
             Type = entry.GetPropertyOrDefault("type")?.GetString() ?? "entity"
         };
 
-        if (!TryGetDouble(entry, "bearing", out var bearing) ||
-            !TryGetDouble(entry, "elevation", out var elevation) ||
-            !TryGetDouble(entry, "range", out var range))
+        if (string.IsNullOrWhiteSpace(entity.Id) && string.IsNullOrWhiteSpace(entity.Name))
         {
             return false;
         }
 
-        entity.Bearing = bearing;
-        entity.Elevation = elevation;
-        entity.Range = range;
+        if (TryGetDouble(entry, "bearing", out var bearing))
+        {
+            entity.Bearing = bearing;
+        }
+
+        if (TryGetDouble(entry, "elevation", out var elevation))
+        {
+            entity.Elevation = elevation;
+        }
+
+        if (TryGetDouble(entry, "range", out var range) || TryGetDouble(entry, "distance", out range))
+        {
+            entity.Range = range;
+        }
+
         return true;
     }
 

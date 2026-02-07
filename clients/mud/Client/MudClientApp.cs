@@ -14,7 +14,6 @@ public sealed class MudClientApp : IDisposable
     private const int MaxLogLines = 2000;
     private const double ShakeThreshold = 0.5;
     private static readonly TimeSpan MovementKeyWindow = TimeSpan.FromMilliseconds(650);
-    private static readonly string[] NavigationSpeeds = { "run", "jog", "walk" };
     private static readonly IReadOnlyList<KeybindAction> KeybindActions = new[]
     {
         new KeybindAction("ability.1", "Ability Slot 1", "1", "/cast ability1"),
@@ -71,13 +70,10 @@ public sealed class MudClientApp : IDisposable
     private Label _vitalsLabel = null!;
     private FrameView _logFrame = null!;
     private View _sidebar = null!;
-    private PositionRingView _ringView = null!;
     private FrameView _navigationFrame = null!;
     private FrameView _partyFrame = null!;
     private ListView _partyListView = null!;
     private CompassView _compassView = null!;
-    private string? _pendingDirection;
-    private string? _pendingSpeed;
     private FrameView _rosterFrame = null!;
     private ListView _entityListView = null!;
     private Button _approachButton = null!;
@@ -89,12 +85,18 @@ public sealed class MudClientApp : IDisposable
     private readonly HashSet<string> _engagedEntities = new(StringComparer.OrdinalIgnoreCase);
     private Label _entityActionLabel = null!;
     private readonly List<NearbyEntityInfo> _entityRosterSnapshot = new();
+    private FrameView _landmarkFrame = null!;
+    private ListView _landmarkListView = null!;
+    private Button _landmarkGoToButton = null!;
+    private Label _landmarkActionLabel = null!;
+    private readonly List<NearbyEntityInfo> _landmarkSnapshot = new();
     private MenuBar _menuBar = null!;
     private StatusBar _statusBar = null!;
     private Window _window = null!;
     private string _activeThemeName = "ember";
     private ConnectionProfile? _activeConnection;
     private string? _activeAccountName;
+    private string? _activeAuthMethod;
     private string? _activeCharacterName;
     private string? _activeWorldName;
     private bool _isConnected;
@@ -156,11 +158,6 @@ public sealed class MudClientApp : IDisposable
                 new MenuItem("_Toggle Timestamps", "", ToggleTimestamps),
                 new MenuItem("_Reload Config", "", ReloadConfig),
                 new MenuItem("_Settings", "", ShowSettingsDialog)
-            }),
-            new MenuBarItem("_Navigation", new[]
-            {
-                new MenuItem("_Ring", "", () => SetNavigationStyle(NavigationRingStyle.Ring)),
-                new MenuItem("_Grid", "", () => SetNavigationStyle(NavigationRingStyle.Grid))
             }),
             new MenuBarItem("_Themes", BuildThemeMenuItems())
         });
@@ -266,9 +263,9 @@ public sealed class MudClientApp : IDisposable
         _logSource = new LogListSource(_logEntries);
         _logView = new ListView(_logSource)
         {
-            X = 0,
+            X = 1,
             Y = 0,
-            Width = Dim.Fill(),
+            Width = Dim.Fill(1),
             Height = Dim.Fill()
         };
         _logFrame.Add(_logView);
@@ -312,39 +309,22 @@ public sealed class MudClientApp : IDisposable
             X = 0,
             Y = 0,
             Width = Dim.Fill(),
-            Height = 10
+            Height = 7
         };
 
         _compassView = new CompassView
         {
             X = 1,
             Y = 0,
-            Width = Dim.Fill(),
-            Height = 8,
+            Width = Dim.Fill(1),
+            Height = 5,
             CanFocus = true,
-            WantMousePositionReports = true
+            WantMousePositionReports = true,
+            Visible = true
         };
 
         _compassView.DirectionSelected += OnCompassDirectionSelected;
-        _compassView.SpeedSelected += OnCompassSpeedSelected;
         _compassView.StopSelected += OnCompassStopSelected;
-
-        _ringView = new PositionRingView
-        {
-            X = 0,
-            Y = 0,
-            Width = 0,
-            Height = 0,
-            CanFocus = true,
-            RangeBands = NavigationSpeeds,
-            AngleStep = 45,
-            WantMousePositionReports = true,
-            Visible = false
-        };
-        _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
-        _ringView.SelectionConfirmed += OnRingSelectionConfirmed;
-        _ringView.SelectionChanged += OnRingSelectionChanged;
-        _ringView.StopRequested += OnRingStopRequested;
 
         _navigationFrame.Add(_compassView);
 
@@ -365,12 +345,12 @@ public sealed class MudClientApp : IDisposable
         };
         _partyFrame.Add(_partyListView);
 
-        _rosterFrame = new FrameView("Nearby Entities")
+        _rosterFrame = new FrameView("Entities")
         {
             X = 0,
             Y = Pos.Bottom(_partyFrame),
             Width = Dim.Fill(),
-            Height = Dim.Fill()
+            Height = Dim.Percent(50)
         };
 
         _entityListView = new ListView(Array.Empty<string>())
@@ -449,10 +429,55 @@ public sealed class MudClientApp : IDisposable
         entityActionBar.Add(_examineButton, _talkButton, _greetButton, _approachButton, _withdrawButton, _engageToggleButton, _entityActionLabel);
         _rosterFrame.Add(_entityListView, entityActionBar);
 
-        _sidebar.Add(_navigationFrame, _partyFrame, _rosterFrame);
+        _landmarkFrame = new FrameView("Landmarks")
+        {
+            X = 0,
+            Y = Pos.Bottom(_rosterFrame),
+            Width = Dim.Fill(),
+            Height = Dim.Fill()
+        };
+
+        _landmarkListView = new ListView(Array.Empty<string>())
+        {
+            X = 0,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = Dim.Fill(2)
+        };
+        _landmarkListView.SelectedItemChanged += _ => UpdateLandmarkActionState();
+
+        var landmarkActionBar = new View
+        {
+            X = 0,
+            Y = Pos.Bottom(_landmarkListView),
+            Width = Dim.Fill(),
+            Height = 2
+        };
+
+        _landmarkGoToButton = new Button("Go To")
+        {
+            X = 0,
+            Y = 0,
+            Enabled = false
+        };
+        _landmarkGoToButton.Clicked += () => _ = GoToLandmarkAsync();
+
+        _landmarkActionLabel = new Label("Select a landmark")
+        {
+            X = Pos.Right(_landmarkGoToButton) + 1,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = 1
+        };
+
+        landmarkActionBar.Add(_landmarkGoToButton, _landmarkActionLabel);
+        _landmarkFrame.Add(_landmarkListView, landmarkActionBar);
+
+        _sidebar.Add(_navigationFrame, _partyFrame, _rosterFrame, _landmarkFrame);
 
         window.Add(header, _logFrame, inputFrame, _sidebar);
         RefreshEntityRoster();
+        RefreshLandmarkRoster();
         RefreshMovementState();
         RefreshCombatState();
         RefreshVitalsState();
@@ -521,6 +546,7 @@ public sealed class MudClientApp : IDisposable
                 RefreshVitalsState();
                 RefreshPartyState();
                 RefreshEntityRoster();
+                RefreshLandmarkRoster();
 
                 if (_pendingCharacterDialog)
                 {
@@ -1171,126 +1197,22 @@ public sealed class MudClientApp : IDisposable
         _inputField.SetFocus();
     }
 
-    private void OnRingSelectionChanged(PositionSelection selection)
+    private void OnCompassDirectionSelected(string direction, string speed)
     {
-        _compassView.SelectedSpeed = selection.RangeBand;
-        _compassView.SetNeedsDisplay();
-    }
+        if (string.IsNullOrWhiteSpace(direction) || !TryParseCompass(direction, out var compass))
+        {
+            return;
+        }
 
-    private void OnRingSelectionConfirmed(PositionSelection selection)
-    {
-        var direction = HeadingToCompass(selection.AngleDegrees);
-        var speed = string.IsNullOrWhiteSpace(selection.RangeBand) ? "walk" : selection.RangeBand.ToLowerInvariant();
-        _ = SendMovementCommandAsync(new MovementCommand(speed, null, direction, null, null));
+        var heading = CompassToHeading(compass);
+        _ = SendMovementCommandAsync(new MovementCommand(speed, heading, null, null, null));
         _inputField.SetFocus();
-    }
-
-    private void OnRingStopRequested()
-    {
-        _ = SendSlashCommandAsync("/stop");
-        _inputField.SetFocus();
-    }
-
-    private void OnCompassDirectionSelected(string direction)
-    {
-        if (string.IsNullOrWhiteSpace(direction))
-        {
-            return;
-        }
-
-        if (!string.IsNullOrWhiteSpace(_pendingSpeed))
-        {
-            SendCompassMove(direction, _pendingSpeed);
-            _pendingDirection = null;
-            _pendingSpeed = null;
-            return;
-        }
-
-        if (!string.IsNullOrWhiteSpace(_pendingDirection))
-        {
-            var speed = ResolveSpeedForCommand();
-            if (!string.IsNullOrWhiteSpace(speed))
-            {
-                SendCompassMove(direction, speed);
-                _pendingDirection = null;
-                return;
-            }
-        }
-
-        _pendingDirection = direction;
-    }
-
-    private void OnCompassSpeedSelected(string speed)
-    {
-        if (string.IsNullOrWhiteSpace(speed))
-        {
-            return;
-        }
-
-        if (!string.IsNullOrWhiteSpace(_pendingDirection))
-        {
-            SendCompassMove(_pendingDirection, speed);
-            _pendingDirection = null;
-            _pendingSpeed = null;
-            return;
-        }
-
-        if (!string.IsNullOrWhiteSpace(_pendingSpeed))
-        {
-            var direction = ResolveDirectionForCommand();
-            if (!string.IsNullOrWhiteSpace(direction))
-            {
-                SendCompassMove(direction, speed);
-                _pendingSpeed = null;
-                return;
-            }
-        }
-
-        _pendingSpeed = speed;
     }
 
     private void OnCompassStopSelected()
     {
-        _pendingDirection = null;
-        _pendingSpeed = null;
         _ = SendSlashCommandAsync("/stop");
         _inputField.SetFocus();
-    }
-
-    private void SendCompassMove(string direction, string speed)
-    {
-        _ = SendMovementCommandAsync(new MovementCommand(NormalizeSpeed(speed), null, direction, null, null));
-        _inputField.SetFocus();
-    }
-
-    private string? ResolveSpeedForCommand()
-    {
-        if (!string.IsNullOrWhiteSpace(_pendingSpeed))
-        {
-            return NormalizeSpeed(_pendingSpeed);
-        }
-
-        if (!string.IsNullOrWhiteSpace(_state.CurrentSpeed))
-        {
-            return NormalizeSpeed(_state.CurrentSpeed);
-        }
-
-        return "walk";
-    }
-
-    private string? ResolveDirectionForCommand()
-    {
-        if (!string.IsNullOrWhiteSpace(_pendingDirection))
-        {
-            return _pendingDirection;
-        }
-
-        if (_state.CurrentHeading.HasValue)
-        {
-            return HeadingToCompass(NormalizeHeading(_state.CurrentHeading.Value));
-        }
-
-        return null;
     }
 
     private static string NormalizeSpeed(string speed)
@@ -1303,36 +1225,10 @@ public sealed class MudClientApp : IDisposable
         };
     }
 
-    private void SetNavigationStyle(NavigationRingStyle style)
-    {
-        _ringView.Style = style;
-        _config.NavRingStyle = style switch
-        {
-            NavigationRingStyle.Grid => "grid",
-            _ => "ring"
-        };
-        _ringView.SetNeedsDisplay();
-        SaveAppearanceToActiveProfile();
-        SaveConfig();
-        AppendLogLine($"Navigation style: {_config.NavRingStyle}");
-    }
-
-    private static NavigationRingStyle ParseNavigationRingStyle(string? value)
-    {
-        if (string.Equals(value, "grid", StringComparison.OrdinalIgnoreCase))
-        {
-            return NavigationRingStyle.Grid;
-        }
-
-        return NavigationRingStyle.Ring;
-    }
-
     private void RefreshTargetState()
     {
         var targetToken = _state.CurrentTargetName ?? _state.CurrentTargetId;
         _targetLabel.Text = $"Target: {(string.IsNullOrWhiteSpace(targetToken) ? "none" : targetToken)}";
-        _ringView.HasTarget = true;
-        _ringView.SetNeedsDisplay();
     }
 
     private void RefreshMovementState()
@@ -1345,9 +1241,6 @@ public sealed class MudClientApp : IDisposable
             : "none";
 
         _movementLabel.Text = $"Movement: {speed} | Facing: {headingCompass} | Available: {directions}";
-        _compassView.SelectedSpeed = _pendingSpeed ?? _state.CurrentSpeed;
-        _compassView.SelectedDirection = _pendingDirection ?? (headingDegrees.HasValue ? HeadingToCompass(headingDegrees.Value) : null);
-        _compassView.SetNeedsDisplay();
     }
 
     private void RefreshCombatState()
@@ -1516,12 +1409,20 @@ public sealed class MudClientApp : IDisposable
         var selectedKey = GetSelectedNearbyEntity() is NearbyEntityInfo selected
             ? BuildEngagementKey(selected)
             : null;
-        var entries = BuildNearbyEntities();
+        var all = BuildAllNearbyEntities();
+        var entries = all.Where(e => !IsLandmarkType(e.Type)).ToList();
+
+        entries = entries
+            .OrderByDescending(e => _engagedEntities.Contains(BuildEngagementKey(e)))
+            .ThenBy(e => e.Type, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(e => e.Range ?? double.MaxValue)
+            .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
         _entityRosterSnapshot.Clear();
         _entityRosterSnapshot.AddRange(entries);
 
-        var lines = entries.Select(FormatNearbyEntityLine).ToList();
+        var lines = entries.Select(FormatEntityLine).ToList();
         if (lines.Count == 0)
         {
             lines.Add("No nearby entities.");
@@ -1550,29 +1451,60 @@ public sealed class MudClientApp : IDisposable
         UpdateEntityActionState();
     }
 
-    private string FormatNearbyEntityLine(NearbyEntityInfo entity)
+    private void RefreshLandmarkRoster()
+    {
+        var all = BuildAllNearbyEntities();
+        var entries = all.Where(e => IsLandmarkType(e.Type))
+            .OrderBy(e => e.Range ?? double.MaxValue)
+            .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        _landmarkSnapshot.Clear();
+        _landmarkSnapshot.AddRange(entries);
+
+        var lines = entries.Select(FormatLandmarkLine).ToList();
+        if (lines.Count == 0)
+        {
+            lines.Add("No landmarks nearby.");
+        }
+
+        _landmarkListView.SetSource(lines);
+        var sourceCount = _landmarkListView.Source.Count;
+        if (entries.Count > 0)
+        {
+            _landmarkListView.SelectedItem = Math.Clamp(_landmarkListView.SelectedItem, 0, sourceCount - 1);
+        }
+        else
+        {
+            _landmarkListView.SelectedItem = sourceCount > 0 ? 0 : -1;
+        }
+
+        UpdateLandmarkActionState();
+    }
+
+    private static string FormatEntityLine(NearbyEntityInfo entity)
     {
         var name = GetEntityDisplayName(entity);
         var type = string.IsNullOrWhiteSpace(entity.Type) ? "entity" : entity.Type;
-        var bearingText = entity.Bearing.HasValue
-            ? $"{(int)Math.Round(NormalizeHeading(entity.Bearing.Value)):000}deg"
-            : "bearing ?";
-        var elevationDisplay = entity.Elevation.HasValue
-            ? $"{(entity.Elevation >= 0 ? "+" : string.Empty)}{entity.Elevation:0.#}ft"
-            : "elev ?";
         var rangeDisplay = FormatDistance(entity.Range);
-
-        return $"{name} ({type}) - {bearingText} | elev {elevationDisplay} | {rangeDisplay}";
+        return $"{name} ({type}) {rangeDisplay}";
     }
 
-    private string GetEntityDisplayName(NearbyEntityInfo entity)
+    private static string FormatLandmarkLine(NearbyEntityInfo entity)
+    {
+        var name = GetEntityDisplayName(entity);
+        var rangeDisplay = FormatDistance(entity.Range);
+        return $"{name} {rangeDisplay}";
+    }
+
+    private static string GetEntityDisplayName(NearbyEntityInfo entity)
     {
         return string.IsNullOrWhiteSpace(entity.Name) ? entity.Id : entity.Name;
     }
 
-    private string FormatDistance(double? value)
+    private static string FormatDistance(double? value)
     {
-        return value.HasValue ? $"{value.Value:0.#}ft range" : "range ?";
+        return value.HasValue ? $"{value.Value:0.#}ft" : "? ft";
     }
 
     private void UpdateEntityActionState()
@@ -1597,7 +1529,22 @@ public sealed class MudClientApp : IDisposable
             _talkButton.Enabled = false;
             _greetButton.Enabled = false;
             _engageToggleButton.Enabled = false;
-            _entityActionLabel.Text = "Select an entity to act on.";
+            _entityActionLabel.Text = "Select an entity";
+        }
+    }
+
+    private void UpdateLandmarkActionState()
+    {
+        var landmark = GetSelectedLandmark();
+        if (landmark is NearbyEntityInfo selected)
+        {
+            _landmarkGoToButton.Enabled = true;
+            _landmarkActionLabel.Text = $"{GetEntityDisplayName(selected)} - {FormatDistance(selected.Range)}";
+        }
+        else
+        {
+            _landmarkGoToButton.Enabled = false;
+            _landmarkActionLabel.Text = "Select a landmark";
         }
     }
 
@@ -1615,6 +1562,36 @@ public sealed class MudClientApp : IDisposable
         }
 
         return _entityRosterSnapshot[index];
+    }
+
+    private NearbyEntityInfo? GetSelectedLandmark()
+    {
+        if (_landmarkSnapshot.Count == 0)
+        {
+            return null;
+        }
+
+        var index = _landmarkListView.SelectedItem;
+        if (index < 0 || index >= _landmarkSnapshot.Count)
+        {
+            return null;
+        }
+
+        return _landmarkSnapshot[index];
+    }
+
+    private async Task GoToLandmarkAsync()
+    {
+        var landmark = GetSelectedLandmark();
+        if (!landmark.HasValue)
+        {
+            AppendLogLine("Select a landmark first.");
+            return;
+        }
+
+        var token = FormatCommandValue(GetEntityMoveToken(landmark.Value));
+        await SendSlashCommandAsync($"/move to:{token}");
+        AppendLogLine($"Moving to {GetEntityDisplayName(landmark.Value)}.");
     }
 
     private async Task MoveRelativeToEntityAsync(bool approach)
@@ -1779,40 +1756,111 @@ public sealed class MudClientApp : IDisposable
         return normalized;
     }
 
-    private List<NearbyEntityInfo> BuildNearbyEntities()
+    private static bool IsLandmarkType(string? type)
     {
-        List<NearbyEntityInfo> raw;
-        if (_state.ProximityRoster.HasEntities())
+        if (string.IsNullOrWhiteSpace(type))
         {
-            raw = _state.ProximityRoster.GetEntitiesForNavigation()
-                .Select(entity => new NearbyEntityInfo(
-                    entity.Id,
-                    entity.Name,
-                    entity.Type,
-                    entity.Bearing,
-                    entity.Elevation,
-                    entity.Range))
-                .ToList();
-        }
-        else
-        {
-            raw = _state.Entities
-                .Where(e => !string.IsNullOrWhiteSpace(e.Name) || !string.IsNullOrWhiteSpace(e.Type))
-                .Select(entity => new NearbyEntityInfo(
-                    entity.Id,
-                    entity.Name,
-                    entity.Type,
-                    entity.Bearing,
-                    GetElevationForEntity(entity),
-                    GetRangeForEntity(entity)))
-                .ToList();
+            return false;
         }
 
-        return DeduplicateNearbyEntities(raw)
-            .OrderByDescending(entity => _engagedEntities.Contains(BuildEngagementKey(entity)))
-            .ThenBy(entity => entity.Range ?? double.MaxValue)
-            .ThenBy(entity => entity.Name, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var t = type.Trim();
+        return t.Contains("landmark", StringComparison.OrdinalIgnoreCase) ||
+               t.Contains("poi", StringComparison.OrdinalIgnoreCase) ||
+               t.Contains("location", StringComparison.OrdinalIgnoreCase) ||
+               t.Contains("structure", StringComparison.OrdinalIgnoreCase) ||
+               t.Contains("building", StringComparison.OrdinalIgnoreCase) ||
+               t.Contains("object", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Maximum visibility range in meters based on entity type.</summary>
+    private static double GetVisibilityRange(string? type)
+    {
+        if (string.IsNullOrWhiteSpace(type))
+            return 100;
+
+        var t = type.Trim();
+
+        // Massive structures (5+ stories) — visible to 1km
+        if (t.Contains("massive", StringComparison.OrdinalIgnoreCase) ||
+            t.Contains("tower", StringComparison.OrdinalIgnoreCase) ||
+            t.Contains("castle", StringComparison.OrdinalIgnoreCase) ||
+            t.Contains("fortress", StringComparison.OrdinalIgnoreCase) ||
+            t.Contains("monument", StringComparison.OrdinalIgnoreCase))
+            return 1000;
+
+        // Landmarks, buildings, structures — visible to 500m
+        if (IsLandmarkType(t))
+            return 500;
+
+        // Living things: players, NPCs, mobs, wildlife, companions — 100m
+        return 100;
+    }
+
+    private List<NearbyEntityInfo> BuildAllNearbyEntities()
+    {
+        var rosterIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var raw = new List<NearbyEntityInfo>();
+
+        // Proximity roster: live spatial data for entities in sensory range.
+        if (_state.ProximityRoster.HasEntities())
+        {
+            foreach (var entity in _state.ProximityRoster.GetEntitiesForNavigation())
+            {
+                var name = entity.Name;
+                var type = entity.Type;
+
+                // Enrich blank names/types from the entity store.
+                if ((string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(type) || type == "entity")
+                    && !string.IsNullOrWhiteSpace(entity.Id))
+                {
+                    var lookup = _state.Entities.FirstOrDefault(e =>
+                        string.Equals(e.Id, entity.Id, StringComparison.OrdinalIgnoreCase));
+                    if (lookup != null)
+                    {
+                        if (string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(lookup.Name))
+                            name = lookup.Name;
+                        if ((string.IsNullOrWhiteSpace(type) || type == "entity") && !string.IsNullOrWhiteSpace(lookup.Type))
+                            type = lookup.Type;
+                    }
+                }
+
+                raw.Add(new NearbyEntityInfo(entity.Id, name, type, entity.Bearing, entity.Elevation, entity.Range));
+                if (!string.IsNullOrWhiteSpace(entity.Id))
+                    rosterIds.Add(entity.Id);
+            }
+        }
+
+        // Entity store: includes all entities from world_entry/state_update,
+        // even those beyond proximity range. Add any within visibility range.
+        foreach (var entity in _state.Entities)
+        {
+            if (string.IsNullOrWhiteSpace(entity.Name) && string.IsNullOrWhiteSpace(entity.Type))
+                continue;
+            if (!string.IsNullOrWhiteSpace(entity.Id) && rosterIds.Contains(entity.Id))
+                continue;
+
+            var range = GetRangeForEntity(entity);
+            var maxVisibility = GetVisibilityRange(entity.Type);
+            if (range.HasValue && range.Value > maxVisibility)
+                continue;
+
+            raw.Add(new NearbyEntityInfo(
+                entity.Id,
+                entity.Name,
+                entity.Type,
+                entity.Bearing,
+                GetElevationForEntity(entity),
+                range));
+        }
+
+        // Filter out the player's own character.
+        var selfId = _state.PlayerId;
+        if (!string.IsNullOrWhiteSpace(selfId))
+        {
+            raw.RemoveAll(e => string.Equals(e.Id, selfId, StringComparison.OrdinalIgnoreCase));
+        }
+
+        return DeduplicateNearbyEntities(raw).ToList();
     }
 
     private static IEnumerable<NearbyEntityInfo> DeduplicateNearbyEntities(IEnumerable<NearbyEntityInfo> entities)
@@ -2041,6 +2089,7 @@ public sealed class MudClientApp : IDisposable
             {
                 case 0:
                     _activeAccountName = GetFieldText(guestField);
+                    _activeAuthMethod = "guest";
                     RefreshSessionHeader();
                     _ = SendMessageAsync("auth", new { method = "guest", guestName = GetFieldText(guestField) });
                     AppendLogLine("Auth: guest request sent.");
@@ -2052,6 +2101,7 @@ public sealed class MudClientApp : IDisposable
                         return;
                     }
                     _activeAccountName = GetFieldText(tokenField);
+                    _activeAuthMethod = "token";
                     RefreshSessionHeader();
                     _ = SendMessageAsync("auth", new { method = "token", token = GetFieldText(tokenField) });
                     AppendLogLine("Auth: token request sent.");
@@ -2064,6 +2114,7 @@ public sealed class MudClientApp : IDisposable
                         return;
                     }
                     _activeAccountName = GetFieldText(userField);
+                    _activeAuthMethod = "credentials";
                     RefreshSessionHeader();
                     _ = SendMessageAsync("auth", new { method = "credentials", username = GetFieldText(userField), password = GetFieldText(passField) });
                     AppendLogLine("Auth: credentials request sent.");
@@ -2474,6 +2525,7 @@ public sealed class MudClientApp : IDisposable
     {
         _activeConnection = connection;
         _activeAccountName = null;
+        _activeAuthMethod = null;
         _activeCharacterName = null;
         _config.ServerUrl = connection.BuildUrl();
         ApplyAppearanceForActiveProfile();
@@ -2509,82 +2561,75 @@ public sealed class MudClientApp : IDisposable
             Height = 5
         };
 
-        var navStyleLabel = new Label("Nav style:")
+        var navFgLabel = new Label("Nav fg:")
         {
             X = 1,
             Y = 7
         };
-        var navStyleGroup = new RadioGroup(12, 7, new[] { (ustring)"Ring", "Grid" }, _ringView.Style == NavigationRingStyle.Grid ? 1 : 0);
-
-        var navFgLabel = new Label("Nav fg:")
-        {
-            X = 1,
-            Y = 11
-        };
         var navFgField = new TextField(_config.NavRingTheme.Foreground ?? string.Empty)
         {
             X = 12,
-            Y = 11,
+            Y = 7,
             Width = 20
         };
 
         var navBgLabel = new Label("Nav bg:")
         {
             X = 1,
-            Y = 13
+            Y = 9
         };
         var navBgField = new TextField(_config.NavRingTheme.Background ?? string.Empty)
         {
             X = 12,
-            Y = 13,
+            Y = 9,
             Width = 20
         };
 
         var chatFgLabel = new Label("Chat fg:")
         {
             X = 1,
-            Y = 15
+            Y = 11
         };
         var chatFgField = new TextField(_config.ChatStyle.Foreground ?? string.Empty)
         {
             X = 12,
-            Y = 15,
+            Y = 11,
             Width = 20
         };
 
         var chatBgLabel = new Label("Chat bg:")
         {
             X = 1,
-            Y = 17
+            Y = 13
         };
         var chatBgField = new TextField(_config.ChatStyle.Background ?? string.Empty)
         {
             X = 12,
-            Y = 17,
+            Y = 13,
             Width = 20
         };
 
         var combatStyleLabel = new Label("Combat:")
         {
             X = 1,
-            Y = 19
+            Y = 15
         };
-        var combatStyleGroup = new RadioGroup(12, 19, new[] { (ustring)"Compact", "Tagged", "Split" }, 0);
+        var combatStyleGroup = new RadioGroup(12, 15, new[] { (ustring)"Compact", "Tagged", "Split" }, 0);
 
-        var combatFxCheck = new CheckBox(1, 22, "Combat fx", _config.CombatDisplay.ShowFx);
-        var combatImpactCheck = new CheckBox(1, 23, "Impact fx (self)", _config.CombatDisplay.ShowImpactFx);
-        var combatColorCheck = new CheckBox(1, 24, "Combat colors", _config.CombatDisplay.UseColorKeys);
-        var combatColorButton = new Button(20, 24, "Edit colors...");
+        var combatFxCheck = new CheckBox(1, 18, "Combat fx", _config.CombatDisplay.ShowFx);
+        var combatImpactCheck = new CheckBox(1, 19, "Impact fx (self)", _config.CombatDisplay.ShowImpactFx);
+        var combatColorCheck = new CheckBox(1, 20, "Combat colors", _config.CombatDisplay.UseColorKeys);
+        var combatColorButton = new Button(20, 20, "Edit colors...");
 
         var fontNote = new Label("Fonts are set in your terminal emulator.")
         {
             X = 1,
-            Y = 26,
+            Y = 22,
             Width = 32
         };
 
-        var wrapLogCheck = new CheckBox(1, 27, "Wrap log", _config.WrapLogLines);
-        var devNoticeCheck = new CheckBox(1, 28, "Dev notices", _config.ShowDevNotices);
+        var wrapLogCheck = new CheckBox(1, 23, "Wrap log", _config.WrapLogLines);
+        var devNoticeCheck = new CheckBox(1, 24, "Dev notices", _config.ShowDevNotices);
 
         var keybindFrame = new FrameView("Keybinds")
         {
@@ -2651,7 +2696,7 @@ public sealed class MudClientApp : IDisposable
 
         keybindFrame.Add(scopeLabel, scopeGroup, scopeNote, actionList, bindingLabel, bindingField, bindButton, bindHint, commandLabel, commandField);
 
-        dialog.Add(themeLabel, themeList, navStyleLabel, navStyleGroup, navFgLabel, navFgField, navBgLabel, navBgField,
+        dialog.Add(themeLabel, themeList, navFgLabel, navFgField, navBgLabel, navBgField,
             chatFgLabel, chatFgField, chatBgLabel, chatBgField, combatStyleLabel, combatStyleGroup, combatFxCheck,
             combatImpactCheck, combatColorCheck, combatColorButton, fontNote, wrapLogCheck, devNoticeCheck, keybindFrame);
 
@@ -2823,7 +2868,6 @@ public sealed class MudClientApp : IDisposable
 
             var theme = themes.ElementAtOrDefault(themeList.SelectedItem) ?? _config.Theme;
             _config.Theme = theme;
-            _config.NavRingStyle = navStyleGroup.SelectedItem == 1 ? "grid" : "ring";
             _config.NavRingTheme.Foreground = GetFieldText(navFgField).Trim();
             _config.NavRingTheme.Background = GetFieldText(navBgField).Trim();
             _config.ChatStyle.Foreground = GetFieldText(chatFgField).Trim();
@@ -2842,7 +2886,6 @@ public sealed class MudClientApp : IDisposable
                 : new Dictionary<string, string>(workingCombatColorKeys, StringComparer.OrdinalIgnoreCase);
             _config.WrapLogLines = wrapLogCheck.Checked;
             _config.ShowDevNotices = devNoticeCheck.Checked;
-            _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
             ApplyTheme(_config.Theme, logChange: true);
             _router.UpdateCombatDisplay(_config.CombatDisplay);
             UpdateLogWrapWidth();
@@ -3196,10 +3239,11 @@ public sealed class MudClientApp : IDisposable
         var speed = string.IsNullOrWhiteSpace(movement.Speed) ? "walk" : NormalizeSpeed(movement.Speed);
         if (movement.Compass != null)
         {
+            var compass = movement.Compass.ToUpperInvariant();
             var payload = new
             {
-                method = "compass",
-                compass = movement.Compass.ToUpperInvariant(),
+                method = "heading",
+                heading = CompassToHeading(compass),
                 speed,
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
@@ -3475,6 +3519,22 @@ public sealed class MudClientApp : IDisposable
         return dirs[Math.Clamp(index, 0, dirs.Length - 1)];
     }
 
+    private static int CompassToHeading(string compass)
+    {
+        return compass switch
+        {
+            "N" => 0,
+            "NE" => 45,
+            "E" => 90,
+            "SE" => 135,
+            "S" => 180,
+            "SW" => 225,
+            "W" => 270,
+            "NW" => 315,
+            _ => 0
+        };
+    }
+
     private static string FormatCommandValue(string value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -3544,8 +3604,6 @@ public sealed class MudClientApp : IDisposable
         _sendMode = SocketMessageModeParser.Parse(_config.SendMode, SocketMessageMode.Event);
         _receiveMode = SocketMessageModeParser.Parse(_config.ReceiveMode, SocketMessageMode.Event);
 
-        _ringView.RangeBands = NavigationSpeeds;
-        _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
         _defaultAppearance = BuildAppearanceFromConfig(_config);
         ApplyTheme(_config.Theme, logChange: true);
         _router.UpdateCombatDisplay(_config.CombatDisplay);
@@ -3699,6 +3757,7 @@ public sealed class MudClientApp : IDisposable
             case "guest":
                 {
                     var name = parts.Length > 2 ? parts[2] : "Wanderer";
+                    _activeAuthMethod = "guest";
                     _ = SendMessageAsync("auth", new { method = "guest", guestName = name });
                     break;
                 }
@@ -3708,6 +3767,7 @@ public sealed class MudClientApp : IDisposable
                     AppendLogLine("Usage: /auth token <token>");
                     return;
                 }
+                _activeAuthMethod = "token";
                 _ = SendMessageAsync("auth", new { method = "token", token = parts[2] });
                 break;
             case "creds":
@@ -3716,6 +3776,7 @@ public sealed class MudClientApp : IDisposable
                     AppendLogLine("Usage: /auth creds <username> <password>");
                     return;
                 }
+                _activeAuthMethod = "credentials";
                 _ = SendMessageAsync("auth", new { method = "credentials", username = parts[2], password = parts[3] });
                 break;
             default:
@@ -3795,7 +3856,6 @@ public sealed class MudClientApp : IDisposable
         }
 
         var scheme = _themeManager.Resolve(themeName, _config.CustomTheme, out var resolvedName);
-        var ringScheme = ResolveNavRingScheme(scheme, _config.NavRingTheme);
         _activeThemeName = resolvedName;
         _config.Theme = resolvedName;
 
@@ -3810,7 +3870,6 @@ public sealed class MudClientApp : IDisposable
         _partyFrame.ColorScheme = scheme;
         _partyListView.ColorScheme = scheme;
         _compassView.ColorScheme = scheme;
-        _ringView.ColorScheme = ringScheme;
         _statusLabel.ColorScheme = scheme;
         _targetLabel.ColorScheme = scheme;
         _movementLabel.ColorScheme = scheme;
@@ -3818,13 +3877,17 @@ public sealed class MudClientApp : IDisposable
         _vitalsLabel.ColorScheme = scheme;
         _rosterFrame.ColorScheme = scheme;
         _entityListView.ColorScheme = scheme;
-            _approachButton.ColorScheme = scheme;
+        _approachButton.ColorScheme = scheme;
         _withdrawButton.ColorScheme = scheme;
         _entityActionLabel.ColorScheme = scheme;
         _examineButton.ColorScheme = scheme;
         _talkButton.ColorScheme = scheme;
         _greetButton.ColorScheme = scheme;
         _engageToggleButton.ColorScheme = scheme;
+        _landmarkFrame.ColorScheme = scheme;
+        _landmarkListView.ColorScheme = scheme;
+        _landmarkGoToButton.ColorScheme = scheme;
+        _landmarkActionLabel.ColorScheme = scheme;
 
         Application.Top.SetNeedsDisplay();
         _window.SetNeedsDisplay();
@@ -3833,40 +3896,6 @@ public sealed class MudClientApp : IDisposable
         {
             AppendLogLine($"Theme set to {_activeThemeName}.");
         }
-    }
-
-    private static ColorScheme ResolveNavRingScheme(ColorScheme baseScheme, NavRingThemeConfig? navTheme)
-    {
-        if (navTheme == null ||
-            (string.IsNullOrWhiteSpace(navTheme.Foreground) && string.IsNullOrWhiteSpace(navTheme.Background)))
-        {
-            return baseScheme;
-        }
-
-        var fg = baseScheme.Normal.Foreground;
-        var bg = baseScheme.Normal.Background;
-
-        if (!string.IsNullOrWhiteSpace(navTheme.Foreground) &&
-            ColorParser.TryParse(navTheme.Foreground, out var parsedForeground))
-        {
-            fg = parsedForeground;
-        }
-
-        if (!string.IsNullOrWhiteSpace(navTheme.Background) &&
-            ColorParser.TryParse(navTheme.Background, out var parsedBackground))
-        {
-            bg = parsedBackground;
-        }
-
-        var normal = new Terminal.Gui.Attribute(fg, bg);
-        return new ColorScheme
-        {
-            Normal = normal,
-            Focus = normal,
-            HotNormal = normal,
-            HotFocus = normal,
-            Disabled = normal
-        };
     }
 
     private void UpdateAuthState(JsonElement payload)
@@ -3885,6 +3914,23 @@ public sealed class MudClientApp : IDisposable
                 var location = entry.GetPropertyOrDefault("location")?.GetString() ?? "Unknown";
                 _characters.Add(new CharacterSummary(id, name, level, location));
             }
+        }
+
+        // Guest auth: server auto-creates and logs in the character, skip character select.
+        if (string.Equals(_activeAuthMethod, "guest", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_characters.Count > 0)
+            {
+                _activeCharacterName = _characters[0].Name;
+                ApplyAppearanceForActiveProfile();
+            }
+            else
+            {
+                _activeCharacterName = _activeAccountName;
+            }
+            _pendingCharacterDialog = false;
+            AppendLogLine($"Guest login: {_activeCharacterName}");
+            return;
         }
 
         if (TryAutoSelectCharacter())
@@ -4150,7 +4196,6 @@ public sealed class MudClientApp : IDisposable
             _config.NavRingTheme = CloneNavRingTheme(settings.NavRingTheme);
         }
 
-        _ringView.Style = ParseNavigationRingStyle(_config.NavRingStyle);
         ApplyTheme(_config.Theme, logChange: false);
         _router.UpdateCombatDisplay(_config.CombatDisplay);
         SaveConfig();

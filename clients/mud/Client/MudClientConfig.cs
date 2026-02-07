@@ -16,7 +16,7 @@ public sealed class MudClientConfig
     public bool AutoConnect { get; set; } = false;
     public string DefaultCommandType { get; set; } = "command";
     public string Theme { get; set; } = "ember";
-    public string NavRingStyle { get; set; } = "ring";
+    public string NavRingStyle { get; set; } = "compass";
     public NavRingThemeConfig NavRingTheme { get; set; } = new();
     public ThemeConfig CustomTheme { get; set; } = new();
     public ChatStyleConfig ChatStyle { get; set; } = new();

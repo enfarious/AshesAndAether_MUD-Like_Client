@@ -548,27 +548,44 @@ public sealed class ProximityRosterCache
 
     public IReadOnlyList<ProximityEntity> GetEntitiesForNavigation()
     {
-        var orderedChannels = new[] { "say", "shout", "see" };
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var result = new List<ProximityEntity>();
+        var best = new Dictionary<string, ProximityEntity>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var channelName in orderedChannels)
+        foreach (var channel in _channels.Values)
         {
-            if (!_channels.TryGetValue(channelName, out var channel))
-            {
-                continue;
-            }
-
             foreach (var entity in channel.Entities.Values)
             {
-                if (seen.Add(entity.Id))
+                if (best.TryGetValue(entity.Id, out var existing))
                 {
-                    result.Add(entity);
+                    // Merge: prefer richer name/type from any channel
+                    if (string.IsNullOrWhiteSpace(existing.Name) && !string.IsNullOrWhiteSpace(entity.Name))
+                        existing.Name = entity.Name;
+                    if ((string.IsNullOrWhiteSpace(existing.Type) || existing.Type == "entity")
+                        && !string.IsNullOrWhiteSpace(entity.Type) && entity.Type != "entity")
+                        existing.Type = entity.Type;
+                    // Take spatial data from whichever has a real range
+                    if (existing.Range == 0 && entity.Range > 0)
+                    {
+                        existing.Bearing = entity.Bearing;
+                        existing.Elevation = entity.Elevation;
+                        existing.Range = entity.Range;
+                    }
+                }
+                else
+                {
+                    best[entity.Id] = new ProximityEntity
+                    {
+                        Id = entity.Id,
+                        Name = entity.Name,
+                        Type = entity.Type,
+                        Bearing = entity.Bearing,
+                        Elevation = entity.Elevation,
+                        Range = entity.Range
+                    };
                 }
             }
         }
 
-        return result;
+        return best.Values.ToList();
     }
 
     public bool HasEntities()
