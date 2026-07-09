@@ -86,3 +86,5 @@ AGENTS.md
 /.agents
 WodMudClient (Beta).exe.lnk
 clients/mud/connections.json
+/.claude
+.claude/settings.local.json
